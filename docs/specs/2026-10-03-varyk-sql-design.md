@@ -342,7 +342,10 @@ an ordinary crate (M3 §2.6) with `build = false` and the generated
   rows it writes by its own name and deletes them first, so a shared
   server database and a rerun do not collide; and CI sets
   `RUST_TEST_THREADS=1` for these runs, which the test binaries honour,
-  so tests sharing one server database run one at a time.
+  so tests sharing one server database run one at a time. `varyk test`
+  cannot select cargo features and the package's default is `sqlite`,
+  so each server leg of CI edits the manifest's `default = ["sqlite"]`
+  line to add its driver before running.
 - `demo/users` builds and prints the expected output under `varyk run`
   on SQLite.
 - CI, in two jobs named `test` (stable) and `msrv` (1.85), the names the
