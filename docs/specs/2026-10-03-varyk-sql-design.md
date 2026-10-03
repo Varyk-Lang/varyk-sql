@@ -43,11 +43,9 @@ async fn main() {
 }
 ```
 
-(`main` returns nothing in Varyk, so the work is in `load` and `main`
-matches on it; `all` takes its `T` from `load`'s return type.)
-
 is a working service against SQLite, Postgres, or MySQL, chosen by the
-URL. The package aims at what an ordinary production service does with a
+URL. (`main` returns nothing in Varyk, so the work is in `load` and
+`main` matches on it; `all` takes its `T` from `load`'s return type.) The package aims at what an ordinary production service does with a
 database and nothing more: connect over TLS, run migrations, query, write
 inside transactions, log, and test against an in-memory SQLite.
 
@@ -186,8 +184,8 @@ When `T` is a number, `bool`, or `string`, the row must have exactly one
 column, so `let n: i64 = db.one("select count(*) from users").await?`
 works, and so does `Option` of a scalar for a column that may be `NULL`
 (`let oldest: Option<i64> = db.one("select max(age) from users")`).
-`Vec` of a scalar, and a struct holding a struct, are not readable from a
-row (an `Error`); a nested type has no column.
+`Vec` or `HashMap` of a scalar, and a struct holding a struct, are not
+readable from a row (an `Error`); a nested type has no column.
 
 ### 2.6 Column types
 
@@ -195,10 +193,13 @@ sqlx's `Any` driver decodes booleans, integers, floats, text, and bytes
 (which Varyk cannot hold), and encodes the same. The drivers do not
 agree on kinds (SQLite reports every integer as a 64-bit one and every
 float as a double, and has no boolean kind), so the deserializer applies
-one rule for all three: a number field accepts any integer or float
-column whose value fits the field's type, and is an `Error` naming the
-column when it does not; a `bool` field accepts a boolean column and an
-integer `0` or `1`; a `string` field accepts text. Any other column
+one rule for all three: an integer column goes into an integer field
+when the value is in the field's range, and into a float field as Rust's
+`as` converts; a float column goes into a float field, and into an
+integer field only when it has no fractional part and is in range; a
+`bool` field accepts a boolean column and an integer `0` or `1`; a
+`string` field accepts text; anything else is an `Error` naming the
+column. Any other column
 type (`uuid`, `timestamp`, `numeric`, `json`, `bytea`, arrays) is cast in
 the query, in the database's own syntax: `select id::text from ..` on
 Postgres, `select cast(id as char) from ..` on MySQL. Varyk has no
@@ -276,7 +277,7 @@ varyk-sql/
                       sql = { package = "varyk-sql", path = "../.." } and
                       its own migrations/
   docs/specs/         this file
-  README.md, LICENSE-MIT, LICENSE-APACHE, CONTRIBUTING.md, SECURITY.md
+  README.md, LICENSE-MIT, LICENSE-APACHE, CONTRIBUTING.md
   .github/workflows/  ci.yml, release-please.yml, commit-messages.yml
   release-please-config.json, .release-please-manifest.json
 ```
@@ -305,9 +306,10 @@ under `demo/`.
   adds a driver with `varyk add sql --features postgres`, and `varyk`
   passes features through (M5b2 §4.3).
 
-`src/db.rs` holds, in order: a call to sqlx's `install_default_drivers`,
-which `Any` needs, at the top of `connect` (sqlx guards it with a `Once`,
-so repeated calls are harmless); `Pool` wrapping `sqlx::AnyPool`, with
+`src/db.rs` holds, in order: `connect_with`, which calls sqlx's
+`install_default_drivers` first (`Any` needs it; sqlx guards it with a
+`Once`, so repeated calls are harmless), and `connect`, which delegates
+to it with sqlx's default; `Pool` wrapping `sqlx::AnyPool`, with
 `#[derive(Clone)]` so Varyk's `db.clone()` works (M4 §2.10), and `Tx`
 wrapping `Option<sqlx::Transaction<'static, sqlx::Any>>`; the four
 query methods on each, sharing one binding function over `Value`; the
@@ -328,8 +330,12 @@ an ordinary crate (M3 §2.6) with `build = false` and the generated
   giving an `Error` without the URL in its message; too few and too
   many values, each an `Error`; a second `migrate` succeeding with the
   row count of `_sqlx_migrations` unchanged (read with `one`).
-- The same tests against Postgres and MySQL, selected by `DATABASE_URL`,
-  with the two placeholders styles.
+- The same tests against Postgres and MySQL when `DATABASE_URL` is set:
+  a test with values picks its query by the URL's scheme with an `if`,
+  since each query is a literal; the schema in `migrations/` is portable
+  across the three (explicit ids, no autoincrement); and CI sets
+  `RUST_TEST_THREADS=1` for these runs, which the test binaries honour,
+  so tests sharing one server database run one at a time.
 - `demo/users` builds and prints the expected output under `varyk run`
   on SQLite.
 - CI, in two jobs named `test` (stable) and `msrv` (1.85), the names the
@@ -339,8 +345,7 @@ an ordinary crate (M3 §2.6) with `build = false` and the generated
   --check
   src/db.rs`, and `cargo clippy` in the crate `varyk publish
   --assemble-only` writes (plain cargo cannot build a package whose
-  target is `src/lib.vr`, M5b2 §1.2); `cargo package` on that assembled
-  crate loads as a dependency (M5b2 §4.4).
+  target is `src/lib.vr`, M5b2 §1.2).
 - No `unwrap`, `expect`, or other crash-on-absence call in `src/db.rs`.
 - README: install, the fifteen-minute example, configuration, TLS,
   migrations with the `Dockerfile` lines, transactions, the column-type
@@ -367,15 +372,17 @@ Mirrors `Varyk-Lang/varyk`:
   CONTRIBUTING.md), with the commit-messages workflow copied;
 - the CI workflow keeps `varyk`'s job names, `test` and `msrv`, since the
   branch ruleset names them as required checks (section 6);
-- `SECURITY.md`, copied from `varyk` with the crate name changed: a
-  database package for network-facing services is where a disclosure
-  policy matters most;
+- no `SECURITY.md` of its own: the organization's shared policy (in
+  `Varyk-Lang/.github`) applies to every repository, already names
+  `varyk-sql` in its scope, and shows in the Security tab; a file here
+  would override it with a shorter copy;
 - the first release is `0.1.0`; a breaking change bumps the minor;
 - dual MIT/Apache-2.0 license; `TRADEMARKS.md` of `varyk` applies to the
   `varyk-` name, so the crate is published by the organisation;
 - `varyk` itself is installed in CI from crates.io (`cargo install
   varyk`), pinned to the minimum version the package needs; a `path`
-  checkout is used only while the compiler feature is unreleased.
+  checkout, with `VARYK_STD_PATH` pointing at its `varyk-std` (M5b2
+  §4.7), is used only while the compiler feature is unreleased.
 
 ## 8. Not in this version
 
