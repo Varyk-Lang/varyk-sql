@@ -223,9 +223,9 @@ down in the README:
 - **Logging.** sqlx logs each statement at debug level through `tracing`,
   which `varyk-std` sets up when the program logs (M5a §2.6): the SQL
   text and the timing, never the values. Nothing to build.
-- **Tests.** `sql::connect("sqlite::memory:")` in a `#[test]` under
-  `varyk test`; a test returns nothing, so it opens the `Result`s with
-  `match` and `assert`. sqlx gives each `:memory:` pool one shared-cache
+- **Tests.** `sql::connect("sqlite::memory:")` in an async `#[test]`
+  under `varyk test`; a test returns nothing, so it opens the `Result`s
+  with `match` and `assert`. sqlx gives each `:memory:` pool one shared-cache
   database of its own, so every connection of the pool sees the same
   tables; the database is gone once the pool is dropped.
 - **Health.** `db.run("select 1")` as the readiness check.
@@ -257,7 +257,7 @@ varyk-sql/
 
 `Cargo.toml`:
 
-- `[lib] path = "src/lib.vr"` (M5b2 §2.2); `edition = "2024"`,
+- `[lib] path = "src/lib.vr"` (M5b2 §1.2); `edition = "2024"`,
   `rust-version = "1.85"`, dual license, repository, keywords;
 - `[dependencies]`: `varyk-std` (minor-version requirement), `sqlx` 0.8
   with `runtime-tokio`, `any`, `migrate`, and `tls-rustls`, and
@@ -269,8 +269,9 @@ varyk-sql/
   adds a driver with `varyk add sql --features postgres`, and `varyk`
   passes features through (M5b2 §4.3).
 
-`src/db.rs` holds, in order: `install_default_drivers` called once at
-`connect` (sqlx's `Any` needs it); `Pool` wrapping `sqlx::AnyPool`, with
+`src/db.rs` holds, in order: sqlx's `install_default_drivers`, which
+`Any` needs, behind a `std::sync::Once` so that `connect` runs it exactly
+once per process and no second call can panic; `Pool` wrapping `sqlx::AnyPool`, with
 `#[derive(Clone)]` so Varyk's `db.clone()` works (M4 §2.10), and `Tx`
 wrapping `Option<sqlx::Transaction<'static, sqlx::Any>>`; the four
 query methods on each, sharing one binding function over `Value`; the
@@ -280,7 +281,8 @@ an ordinary crate (M3 §2.6) with `build = false` and the generated
 
 ## 6. Testing and definition of done
 
-- `varyk test` in the package: the schema applied by `migrate`, each of
+- `varyk test` in the package, async tests: the schema applied by
+  `migrate`, each of
   `one`, `first`, `all`, and `run` with zero and several values; `one` on
   no row; `first` giving `None`; a scalar `T`; a `NULL` into an `Option`
   and into a plain field; a missing column; `#[rename]`; a transaction
@@ -311,9 +313,9 @@ item in `Varyk-Lang/varyk` is checked.
 Mirrors `Varyk-Lang/varyk`:
 
 - release-please with `release-type: rust`, one package at the root,
-  `bump-minor-pre-major` and `bump-patch-for-minor-pre-major`; the
-  workflow publishes with `cargo publish` on a release (through `varyk
-  publish`, which assembles the plain crate first, M3 §2.6) and checks
+  `bump-minor-pre-major` and `bump-patch-for-minor-pre-major`; on a
+  release the workflow publishes with `varyk publish`, which assembles
+  the plain crate and runs `cargo publish` (M3 §2.6), and checks
   that the released version has its tag; no angle brackets in commit
   subjects (the release-notes rule of `varyk`'s CONTRIBUTING.md), with
   the commit-messages workflow copied;
