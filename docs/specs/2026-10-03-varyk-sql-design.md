@@ -23,7 +23,7 @@ struct User {
     name: string,
 }
 
-async fn main() -> Result<(), Error> {
+async fn run() -> Result<(), Error> {
     let config: Config = env::parse()?;
     let db = sql::connect(config.database_url).await?;
     db.migrate("migrations").await?;
@@ -33,6 +33,13 @@ async fn main() -> Result<(), Error> {
         println!("{} {}", user.id, user.name);
     }
     Ok(())
+}
+
+async fn main() {
+    match run().await {
+        Ok(()) => {}
+        Err(e) => log::error("{}", e.message()),
+    }
 }
 ```
 
@@ -66,7 +73,7 @@ inside transactions, log, and test against an in-memory SQLite.
 Everything a program sees is in `src/lib.vr`:
 
 ```varyk
-mod db;
+pub mod db;
 pub use db::connect;
 pub use db::connect_with;
 pub use db::Pool;
@@ -100,8 +107,8 @@ milestone 5b4's business.
 |---|---|---|
 | `db.migrate(folder)` | `Result<(), Error>` | applies, in order, every `.sql` file in `folder` not yet recorded in the database's `_sqlx_migrations` table |
 
-`folder` is literal text (M5b3 §2.3), a path relative to the working
-directory, usually `"migrations"`. Files are named `<version>_<name>.sql`,
+`folder` is a `string`, a path relative to the working directory, usually
+`"migrations"`; it may come from configuration. Files are named `<version>_<name>.sql`,
 sqlx's format, so the same folder works with `sqlx migrate add` and
 `sqlx migrate run`. sqlx takes a database lock on Postgres and MySQL
 while applying, so several replicas starting together apply each
@@ -153,9 +160,14 @@ transaction is dropped. There is no `rollback` call: return early, with
 
 A row is read into `T` by column name through a small serde deserializer
 over sqlx's row: each field of `T` takes the column of the same name
-(`#[rename]` on the field changes it, M5a §2.5), columns `T` has no field
+(`#[rename]` on the field changes it, M5a §2.2), columns `T` has no field
 for are ignored, and a field without a column is an `Error` naming the
-field, unless it has `#[default]` or is skipped. A `NULL` goes into an
+field, unless it has `#[default]` or is skipped. Every selected column
+must be of a type the driver decodes (section 2.6), whether or not `T`
+reads it: sqlx's `Any` converts the whole row before the deserializer
+sees it, so `select *` on a table with a `timestamptz` column fails
+even when `User` has no such field. Name the columns, and cast the
+others. A `NULL` goes into an
 `Option` field as `None` and into any other field as an `Error` naming
 the column.
 
@@ -200,7 +212,8 @@ down in the README:
 - **Configuration.** `DATABASE_URL` through `env::parse` into the
   program's config struct, as in section 1; the README shows it and the
   `.env` form for development.
-- **TLS.** sqlx is built with its rustls feature and webpki roots, so
+- **TLS.** sqlx is built with its `tls-rustls` feature (ring and webpki
+  roots in sqlx 0.8), so
   `sslmode=require` on Postgres and `ssl-mode=REQUIRED` on MySQL work in a
   minimal container with no CA bundle, and `varyk build --release` stays
   one native executable with no OpenSSL. The README shows the URL forms.
@@ -208,12 +221,13 @@ down in the README:
   run` from CI on the same folder; a `Dockerfile` copies `migrations/`
   beside the executable. The README has the `Dockerfile` lines.
 - **Logging.** sqlx logs each statement at debug level through `tracing`,
-  which `varyk-std` sets up when the program logs (M5a §2.7): the SQL
+  which `varyk-std` sets up when the program logs (M5a §2.6): the SQL
   text and the timing, never the values. Nothing to build.
 - **Tests.** `sql::connect("sqlite::memory:")` in a `#[test]` under
-  `varyk test`. A pool of in-memory SQLite connections sees one database
-  only if sqlx shares it across the pool; the plan verifies that and, if
-  it does not, `connect` on a `:memory:` URL sets `max_connections` to 1.
+  `varyk test`; a test returns nothing, so it opens the `Result`s with
+  `match` and `assert`. sqlx gives each `:memory:` pool one shared-cache
+  database of its own, so every connection of the pool sees the same
+  tables; the database is gone once the pool is dropped.
 - **Health.** `db.run("select 1")` as the readiness check.
 - **Building.** The default `sqlite` feature compiles SQLite's C source
   on the first build and needs a C compiler (Xcode's command-line tools,
@@ -245,8 +259,8 @@ varyk-sql/
 
 - `[lib] path = "src/lib.vr"` (M5b2 §2.2); `edition = "2024"`,
   `rust-version = "1.85"`, dual license, repository, keywords;
-- `[dependencies]`: `varyk-std` (minor-version requirement), `sqlx` with
-  `runtime-tokio`, `any`, `migrate`, and the rustls TLS feature, and
+- `[dependencies]`: `varyk-std` (minor-version requirement), `sqlx` 0.8
+  with `runtime-tokio`, `any`, `migrate`, and `tls-rustls`, and
   `serde` for the deserializer (`varyk-std` re-exports serde for
   signatures; the deserializer's impls are easier against the crate
   directly);
@@ -256,8 +270,9 @@ varyk-sql/
   passes features through (M5b2 §4.3).
 
 `src/db.rs` holds, in order: `install_default_drivers` called once at
-`connect` (sqlx's `Any` needs it); `Pool` wrapping `sqlx::AnyPool` and
-`Tx` wrapping `Option<sqlx::Transaction<'static, sqlx::Any>>`; the four
+`connect` (sqlx's `Any` needs it); `Pool` wrapping `sqlx::AnyPool`, with
+`#[derive(Clone)]` so Varyk's `db.clone()` works (M4 §2.10), and `Tx`
+wrapping `Option<sqlx::Transaction<'static, sqlx::Any>>`; the four
 query methods on each, sharing one binding function over `Value`; the
 row deserializer; and the error mapping of section 3. Published, it is
 an ordinary crate (M3 §2.6) with `build = false` and the generated
@@ -278,9 +293,11 @@ an ordinary crate (M3 §2.6) with `build = false` and the generated
 - `examples/users` builds and prints the expected output under
   `varyk run` on SQLite.
 - CI: `varyk check`, the tests on SQLite, and the tests on Postgres and
-  MySQL service containers, on stable and on 1.85; `cargo fmt --check`
-  and `cargo clippy` on `src/db.rs`; `cargo package` on the assembled
-  crate (M5b2 §4.5) loads as a dependency.
+  MySQL service containers, on stable and on 1.85; `rustfmt --check
+  src/db.rs`, and `cargo clippy` in the crate `varyk publish
+  --assemble-only` writes (plain cargo cannot build a package whose
+  target is `src/lib.vr`, M5b2 §1.2); `cargo package` on that assembled
+  crate loads as a dependency (M5b2 §4.5).
 - No `unwrap`, `expect`, or other crash-on-absence call in `src/db.rs`.
 - README: install, the fifteen-minute example, configuration, TLS,
   migrations with the `Dockerfile` lines, transactions, the column-type
