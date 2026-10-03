@@ -385,7 +385,10 @@ Mirrors `Varyk-Lang/varyk`:
 - no `SECURITY.md` of its own: the organization's shared policy (in
   `Varyk-Lang/.github`) applies to every repository, already names
   `varyk-sql` in its scope, and shows in the Security tab; a file here
-  would override it with a shorter copy;
+  would override it with a shorter copy; a doc that points to it (the
+  README, CONTRIBUTING.md) links
+  https://github.com/Varyk-Lang/varyk-sql/security/policy by URL, so the
+  link works in a clone and on crates.io;
 - the first release is `0.1.0`; a breaking change bumps the minor;
 - dual MIT/Apache-2.0 license; `TRADEMARKS.md` of `varyk` applies to the
   `varyk-` name, so the crate is published by the organisation;
