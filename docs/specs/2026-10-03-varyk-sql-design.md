@@ -272,7 +272,11 @@ under `demo/`.
 `Cargo.toml`:
 
 - `[lib] path = "src/lib.vr"` (M5b2 §1.2); `edition = "2024"`,
-  `rust-version = "1.85"`, dual license, repository, keywords;
+  `rust-version = "1.85"`, dual license, `repository`, `keywords`, and
+  four more that the first `cargo publish` needs or crates.io shows:
+  `description` (required, or publishing fails), `homepage =
+  "https://varyk.com"`, `categories = ["database"]`, and `authors =
+  ["Vlad Mickevic"]`;
 - `[dependencies]`: `varyk-std` (minor-version requirement), `sqlx` 0.8
   with `runtime-tokio`, `any`, `migrate`, and `tls-rustls`, and
   `serde` for the deserializer (`varyk-std` re-exports serde for
