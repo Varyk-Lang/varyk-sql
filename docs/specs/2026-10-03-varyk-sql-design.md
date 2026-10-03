@@ -45,7 +45,8 @@ async fn main() {
 
 is a working service against SQLite, Postgres, or MySQL, chosen by the
 URL. (`main` returns nothing in Varyk, so the work is in `load` and
-`main` matches on it; `all` takes its `T` from `load`'s return type.) The package aims at what an ordinary production service does with a
+`main` matches on it; `all` takes its `T` from `load`'s return type.)
+The package aims at what an ordinary production service does with a
 database and nothing more: connect over TLS, run migrations, query, write
 inside transactions, log, and test against an in-memory SQLite.
 
@@ -75,6 +76,7 @@ Everything a program sees is in `src/lib.vr`:
 
 ```varyk
 pub mod db;
+mod tests;
 pub use db::connect;
 pub use db::connect_with;
 pub use db::Pool;
@@ -111,8 +113,8 @@ milestone 5b4's business.
 | `db.migrate(folder)` | `Result<bool, Error>` | applies, in order, every `.sql` file in `folder` not yet recorded in the database's `_sqlx_migrations` table, and gives `true` (Varyk has no `()`, M5b3 §2.4; sqlx's migrator reports no count) |
 
 `folder` is a `string`, a path relative to the working directory, usually
-`"migrations"`; it may come from configuration. Files are named `<version>_<name>.sql`,
-sqlx's format, so the same folder works with `sqlx migrate add` and
+`"migrations"`; it may come from configuration. Files are named
+`<version>_<name>.sql`, sqlx's format, so the same folder works with `sqlx migrate add` and
 `sqlx migrate run`. sqlx takes a database lock on Postgres and MySQL
 while applying, so several replicas starting together apply each
 migration once; SQLite has one writer. A failed migration is an `Error`
@@ -330,10 +332,14 @@ an ordinary crate (M3 §2.6) with `build = false` and the generated
   giving an `Error` without the URL in its message; too few and too
   many values, each an `Error`; a second `migrate` succeeding with the
   row count of `_sqlx_migrations` unchanged (read with `one`).
-- The same tests against Postgres and MySQL when `DATABASE_URL` is set:
-  a test with values picks its query by the URL's scheme with an `if`,
-  since each query is a literal; the schema in `migrations/` is portable
-  across the three (explicit ids, no autoincrement); and CI sets
+- The same tests against Postgres and MySQL: each test reads
+  `DATABASE_URL` with `env::parse` into a struct whose one field is an
+  `Option<string>`, and uses `sqlite::memory:` when it is `None`; a test
+  with values picks its query by the URL's scheme with an `if`, since
+  each query is a literal; the schema in `migrations/` is portable
+  across the three (explicit ids, no autoincrement); a test keys the
+  rows it writes by its own name and deletes them first, so a shared
+  server database and a rerun do not collide; and CI sets
   `RUST_TEST_THREADS=1` for these runs, which the test binaries honour,
   so tests sharing one server database run one at a time.
 - `demo/users` builds and prints the expected output under `varyk run`
@@ -382,7 +388,9 @@ Mirrors `Varyk-Lang/varyk`:
 - `varyk` itself is installed in CI from crates.io (`cargo install
   varyk`), pinned to the minimum version the package needs; a `path`
   checkout, with `VARYK_STD_PATH` pointing at its `varyk-std` (M5b2
-  §4.7), is used only while the compiler feature is unreleased.
+  §4.7) and the clippy step passing `--config
+  patch.crates-io.varyk-std.path=..` for the same checkout, is used only
+  while the compiler feature is unreleased.
 
 ## 8. Not in this version
 
