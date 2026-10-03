@@ -322,7 +322,8 @@ an ordinary crate (M3 §2.6) with `build = false` and the generated
 ## 6. Testing and definition of done
 
 - `varyk test` in the package, async tests in `src/tests.vr` on
-  `connect_with("sqlite::memory:", 1)`: the schema applied by `migrate`,
+  `connect_with(url, 1)`, with `url` from the next bullet
+  (`sqlite::memory:` by default): the schema applied by `migrate`,
   each of
   `one`, `first`, `all`, and `run` with zero and several values; `one` on
   no row; `first` giving `None`; a scalar `T`; a `NULL` into an `Option`
@@ -389,7 +390,8 @@ Mirrors `Varyk-Lang/varyk`:
   varyk`), pinned to the minimum version the package needs; a `path`
   checkout, with `VARYK_STD_PATH` pointing at its `varyk-std` (M5b2
   §4.7) and the clippy step passing `--config
-  patch.crates-io.varyk-std.path=..` for the same checkout, is used only
+  'patch.crates-io.varyk-std.path="<checkout>/crates/varyk-std"'` (the
+  value is TOML, so it is quoted) for the same checkout, is used only
   while the compiler feature is unreleased.
 
 ## 8. Not in this version
