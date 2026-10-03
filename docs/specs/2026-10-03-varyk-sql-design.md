@@ -110,7 +110,7 @@ milestone 5b4's business.
 
 | Call | Gives | Does |
 |---|---|---|
-| `db.migrate(folder)` | `Result<u64, Error>` | applies, in order, every `.sql` file in `folder` not yet recorded in the database's `_sqlx_migrations` table; the number applied (Varyk has no `()`, M5b3 §2.4) |
+| `db.migrate(folder)` | `Result<bool, Error>` | applies, in order, every `.sql` file in `folder` not yet recorded in the database's `_sqlx_migrations` table, and gives `true` (Varyk has no `()`, M5b3 §2.4; sqlx's migrator reports no count) |
 
 `folder` is a `string`, a path relative to the working directory, usually
 `"migrations"`; it may come from configuration. Files are named `<version>_<name>.sql`,
@@ -138,8 +138,13 @@ go after it, as many as the query has placeholders (M5b3 §2.2):
 `bool`, `string`, floats, integers up to `i64`, and `Option` of each.
 The placeholders are the database's own, `?` for SQLite and MySQL, `$1`
 for Postgres, passed through unchanged; a program that targets two
-databases keeps two queries. Too few or too many values is an `Error`
-from the database at run time, since the package does not parse SQL.
+databases keeps two queries. Before running, the shared binding function
+compares the number of values with the number of placeholders the
+prepared statement reports, and a mismatch is an `Error` naming both
+counts. The check is the package's, not the database's: Postgres and
+MySQL reject a mismatch themselves, but SQLite binds a missing value as
+`NULL` and ignores an extra one, which would be wrong data with no
+error.
 
 `T` is chosen from where the result goes (M5b3 §2.1): `let user: User =
 db.one(..).await?`. A handler that answers "not found" uses `first` and
@@ -236,12 +241,15 @@ down in the README:
   with more, a second connection may see no tables. With one, a query on
   the pool while a `Tx` is open waits for the transaction's connection
   and fails after sqlx's acquire timeout, so a test finishes the
-  transaction first. The README says all of this.
+  transaction first, and the database lives for one test: it is gone
+  when the pool is dropped. The README says all of this.
 - **Health.** `db.run("select 1")` as the readiness check.
 - **Building.** The default `sqlite` feature compiles SQLite's C source
   on the first build and needs a C compiler (Xcode's command-line tools,
   `build-essential`); the README says so and notes the first build takes
-  a few minutes.
+  a few minutes; a service on Postgres or MySQL alone adds the package
+  with `varyk add sql --no-default-features --features postgres` and
+  skips it.
 - **Versions.** The package depends on `varyk-std` with a minor-version
   requirement; a program and the package must resolve to one `varyk-std`
   or the generated Rust has two `Error` types. Each breaking Varyk release
@@ -258,7 +266,8 @@ varyk-sql/
   src/tests.vr        the Varyk #[test]s of section 6
   migrations/         the test schema
   demo/users/         the users service of section 1, a Varyk program with
-                      sql = { package = "varyk-sql", path = "../.." }
+                      sql = { package = "varyk-sql", path = "../.." } and
+                      its own migrations/
   docs/specs/         this file
   README.md, LICENSE-MIT, LICENSE-APACHE, CONTRIBUTING.md, SECURITY.md
   .github/workflows/  ci.yml, release-please.yml, commit-messages.yml
@@ -278,7 +287,9 @@ under `demo/`.
   "https://varyk.com"`, `categories = ["database"]`, and `authors =
   ["Vlad Mickevic"]`;
 - `[dependencies]`: `varyk-std` (minor-version requirement), `sqlx` 0.8
-  with `runtime-tokio`, `any`, `migrate`, and `tls-rustls`, and
+  with `default-features = false` (its defaults pull in the macros,
+  which nothing here uses) and the features `runtime-tokio`, `any`,
+  `migrate`, and `tls-rustls`, and
   `serde` for the deserializer (`varyk-std` re-exports serde for
   signatures; the deserializer's impls are easier against the crate
   directly);
@@ -307,8 +318,9 @@ an ordinary crate (M3 §2.6) with `build = false` and the generated
   and into a plain field; a missing column; `#[rename]`; a transaction
   committed, one dropped, and `commit` twice; `connect_with(url, 1)`;
   a URL for a missing driver, a bad URL, and an unreachable database each
-  giving an `Error` without the URL in its message; a second `migrate`
-  applying nothing.
+  giving an `Error` without the URL in its message; too few and too
+  many values, each an `Error`; a second `migrate` succeeding with the
+  row count of `_sqlx_migrations` unchanged (read with `one`).
 - The same tests against Postgres and MySQL, selected by `DATABASE_URL`,
   with the two placeholders styles.
 - `demo/users` builds and prints the expected output under `varyk run`
@@ -320,7 +332,7 @@ an ordinary crate (M3 §2.6) with `build = false` and the generated
   src/db.rs`, and `cargo clippy` in the crate `varyk publish
   --assemble-only` writes (plain cargo cannot build a package whose
   target is `src/lib.vr`, M5b2 §1.2); `cargo package` on that assembled
-  crate loads as a dependency (M5b2 §4.5).
+  crate loads as a dependency (M5b2 §4.4).
 - No `unwrap`, `expect`, or other crash-on-absence call in `src/db.rs`.
 - README: install, the fifteen-minute example, configuration, TLS,
   migrations with the `Dockerfile` lines, transactions, the column-type
@@ -339,7 +351,10 @@ Mirrors `Varyk-Lang/varyk`:
   runs `cargo publish`, this one installs `varyk` and runs `varyk
   publish`, which assembles the plain crate and then runs `cargo publish`
   (M3 §2.6), with `CARGO_REGISTRY_TOKEN` from the `release` environment
-  as there; the tag check stays as copied, for one crate; no angle
+  as there; the package is at the repository root, so the manifest key
+  is `.`, the config sets `include-component-in-tag` to `false`, the tag
+  is `v0.1.0`, and the copied tag check reads that one key and looks for
+  that tag; no angle
   brackets in commit subjects (the release-notes rule of `varyk`'s
   CONTRIBUTING.md), with the commit-messages workflow copied;
 - the CI workflow keeps `varyk`'s job names, `test` and `msrv`, since the
