@@ -23,25 +23,28 @@ struct User {
     name: string,
 }
 
-async fn run() -> Result<(), Error> {
+async fn load() -> Result<Vec<User>, Error> {
     let config: Config = env::parse()?;
     let db = sql::connect(config.database_url).await?;
     db.migrate("migrations").await?;
     db.run("insert into users (name) values (?)", "Ada").await?;
-    let users: Vec<User> = db.all("select id, name from users").await?;
-    for user in users {
-        println!("{} {}", user.id, user.name);
-    }
-    Ok(())
+    db.all("select id, name from users").await
 }
 
 async fn main() {
-    match run().await {
-        Ok(()) => {}
+    match load().await {
+        Ok(users) => {
+            for user in users {
+                println!("{} {}", user.id, user.name);
+            }
+        }
         Err(e) => log::error("{}", e.message()),
     }
 }
 ```
+
+(`main` returns nothing in Varyk, so the work is in `load` and `main`
+matches on it; `all` takes its `T` from `load`'s return type.)
 
 is a working service against SQLite, Postgres, or MySQL, chosen by the
 URL. The package aims at what an ordinary production service does with a
@@ -92,6 +95,8 @@ declares them with the shapes of M5b3 §2.
 | `sql::connect_with(url, max_connections)` | `Result<Pool, Error>` | the same, with at most `max_connections` (a `u32`, at least 1) connections |
 
 `url` is a `string`, usually read from `DATABASE_URL` with `env::parse`.
+`connect_with(url, 0)` is an `Error`, since `varyk check` cannot refuse
+it.
 The scheme picks the driver: `sqlite:`, `postgres:`, or `mysql:`. A URL
 for a driver the program was not built with, a URL that does not parse,
 and a database that cannot be reached are each an `Error`; none of the
@@ -105,7 +110,7 @@ milestone 5b4's business.
 
 | Call | Gives | Does |
 |---|---|---|
-| `db.migrate(folder)` | `Result<(), Error>` | applies, in order, every `.sql` file in `folder` not yet recorded in the database's `_sqlx_migrations` table |
+| `db.migrate(folder)` | `Result<u64, Error>` | applies, in order, every `.sql` file in `folder` not yet recorded in the database's `_sqlx_migrations` table; the number applied (Varyk has no `()`, M5b3 §2.4) |
 
 `folder` is a `string`, a path relative to the working directory, usually
 `"migrations"`; it may come from configuration. Files are named `<version>_<name>.sql`,
@@ -149,7 +154,7 @@ match many rows should say `limit 1` itself.
 |---|---|---|
 | `db.begin()` | `Result<Tx, Error>` | starts a transaction on one connection of the pool |
 | `tx.one`, `tx.first`, `tx.all`, `tx.run` | as on a pool | inside the transaction; each is a `mut self` method, so `tx` is `let mut` |
-| `tx.commit()` | `Result<(), Error>` | commits; a second `commit`, or a query after one, is an `Error` "this transaction is finished" |
+| `tx.commit()` | `Result<bool, Error>` | a `mut self` method: commits and gives `true` (Varyk has no `()`, M5b3 §2.4); a second `commit`, or a query after one, is an `Error` "this transaction is finished" |
 
 A `Tx` dropped without `commit` rolls back, which sqlx does when the
 transaction is dropped. There is no `rollback` call: return early, with
@@ -183,7 +188,8 @@ and text, and encodes the same. Those map to Varyk's types directly; an
 `i8`, `u8`, `u16`, or `u32` field is read through the next wider signed
 type and is an `Error` when the value does not fit. Any other column
 type (`uuid`, `timestamp`, `numeric`, `json`, `bytea`, arrays) is cast in
-the query: `select id::text, created_at::text from ..`. Varyk has no
+the query, in the database's own syntax: `select id::text from ..` on
+Postgres, `select cast(id as char) from ..` on MySQL. Varyk has no
 date, uuid, or bytes type yet; when it does, this list grows.
 
 ## 3. Errors
@@ -223,11 +229,14 @@ down in the README:
 - **Logging.** sqlx logs each statement at debug level through `tracing`,
   which `varyk-std` sets up when the program logs (M5a §2.6): the SQL
   text and the timing, never the values. Nothing to build.
-- **Tests.** `sql::connect("sqlite::memory:")` in an async `#[test]`
-  under `varyk test`; a test returns nothing, so it opens the `Result`s
-  with `match` and `assert`. sqlx gives each `:memory:` pool one shared-cache
-  database of its own, so every connection of the pool sees the same
-  tables; the database is gone once the pool is dropped.
+- **Tests.** `sql::connect_with("sqlite::memory:", 1)` in an async
+  `#[test]` under `varyk test`; a test returns nothing, so it opens the
+  `Result`s with `match` and `assert`. One connection, because an
+  in-memory SQLite database belongs to the connection that opened it:
+  with more, a second connection may see no tables. With one, a query on
+  the pool while a `Tx` is open waits for the transaction's connection
+  and fails after sqlx's acquire timeout, so a test finishes the
+  transaction first. The README says all of this.
 - **Health.** `db.run("select 1")` as the readiness check.
 - **Building.** The default `sqlite` feature compiles SQLite's C source
   on the first build and needs a C compiler (Xcode's command-line tools,
@@ -244,16 +253,21 @@ down in the README:
 ```text
 varyk-sql/
   Cargo.toml
-  src/lib.vr          mod db; pub use ..
+  src/lib.vr          pub mod db; mod tests; pub use ..
   src/db.rs           the facade: Pool, Tx, connect, connect_with, row reading, errors
+  src/tests.vr        the Varyk #[test]s of section 6
   migrations/         the test schema
-  tests/              Varyk #[test]s (section 6)
-  examples/users/     the users service of section 1, a Varyk program
+  demo/users/         the users service of section 1, a Varyk program with
+                      sql = { package = "varyk-sql", path = "../.." }
   docs/specs/         this file
   README.md, LICENSE-MIT, LICENSE-APACHE, CONTRIBUTING.md, SECURITY.md
   .github/workflows/  ci.yml, release-please.yml, commit-messages.yml
   release-please-config.json, .release-please-manifest.json
 ```
+
+No `tests/`, `examples/`, or `benches/` directory: a Varyk package may
+not have them (V0401), so the tests are a module and the demo lives
+under `demo/`.
 
 `Cargo.toml`:
 
@@ -281,8 +295,9 @@ an ordinary crate (M3 §2.6) with `build = false` and the generated
 
 ## 6. Testing and definition of done
 
-- `varyk test` in the package, async tests: the schema applied by
-  `migrate`, each of
+- `varyk test` in the package, async tests in `src/tests.vr` on
+  `connect_with("sqlite::memory:", 1)`: the schema applied by `migrate`,
+  each of
   `one`, `first`, `all`, and `run` with zero and several values; `one` on
   no row; `first` giving `None`; a scalar `T`; a `NULL` into an `Option`
   and into a plain field; a missing column; `#[rename]`; a transaction
@@ -292,8 +307,8 @@ an ordinary crate (M3 §2.6) with `build = false` and the generated
   applying nothing.
 - The same tests against Postgres and MySQL, selected by `DATABASE_URL`,
   with the two placeholders styles.
-- `examples/users` builds and prints the expected output under
-  `varyk run` on SQLite.
+- `demo/users` builds and prints the expected output under `varyk run`
+  on SQLite.
 - CI, in two jobs named `test` (stable) and `msrv` (1.85), the names the
   repository's branch ruleset requires: `varyk check`, the tests on
   SQLite, and the tests on Postgres and MySQL service containers; in
