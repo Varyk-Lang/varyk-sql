@@ -250,7 +250,7 @@ varyk-sql/
   tests/              Varyk #[test]s (section 6)
   examples/users/     the users service of section 1, a Varyk program
   docs/specs/         this file
-  README.md, LICENSE-MIT, LICENSE-APACHE, CONTRIBUTING.md
+  README.md, LICENSE-MIT, LICENSE-APACHE, CONTRIBUTING.md, SECURITY.md
   .github/workflows/  ci.yml, release-please.yml, commit-messages.yml
   release-please-config.json, .release-please-manifest.json
 ```
@@ -294,8 +294,10 @@ an ordinary crate (M3 §2.6) with `build = false` and the generated
   with the two placeholders styles.
 - `examples/users` builds and prints the expected output under
   `varyk run` on SQLite.
-- CI: `varyk check`, the tests on SQLite, and the tests on Postgres and
-  MySQL service containers, on stable and on 1.85; `rustfmt --check
+- CI, in two jobs named `test` (stable) and `msrv` (1.85), the names the
+  repository's branch ruleset requires: `varyk check`, the tests on
+  SQLite, and the tests on Postgres and MySQL service containers; in
+  `test` also `rustfmt --check
   src/db.rs`, and `cargo clippy` in the crate `varyk publish
   --assemble-only` writes (plain cargo cannot build a package whose
   target is `src/lib.vr`, M5b2 §1.2); `cargo package` on that assembled
@@ -313,12 +315,19 @@ item in `Varyk-Lang/varyk` is checked.
 Mirrors `Varyk-Lang/varyk`:
 
 - release-please with `release-type: rust`, one package at the root,
-  `bump-minor-pre-major` and `bump-patch-for-minor-pre-major`; on a
-  release the workflow publishes with `varyk publish`, which assembles
-  the plain crate and runs `cargo publish` (M3 §2.6), and checks
-  that the released version has its tag; no angle brackets in commit
-  subjects (the release-notes rule of `varyk`'s CONTRIBUTING.md), with
-  the commit-messages workflow copied;
+  `bump-minor-pre-major` and `bump-patch-for-minor-pre-major`; the
+  release workflow is `varyk`'s with one step changed: where `varyk`'s
+  runs `cargo publish`, this one installs `varyk` and runs `varyk
+  publish`, which assembles the plain crate and then runs `cargo publish`
+  (M3 §2.6), with `CARGO_REGISTRY_TOKEN` from the `release` environment
+  as there; the tag check stays as copied, for one crate; no angle
+  brackets in commit subjects (the release-notes rule of `varyk`'s
+  CONTRIBUTING.md), with the commit-messages workflow copied;
+- the CI workflow keeps `varyk`'s job names, `test` and `msrv`, since the
+  branch ruleset names them as required checks (section 6);
+- `SECURITY.md`, copied from `varyk` with the crate name changed: a
+  database package for network-facing services is where a disclosure
+  policy matters most;
 - the first release is `0.1.0`; a breaking change bumps the minor;
 - dual MIT/Apache-2.0 license; `TRADEMARKS.md` of `varyk` applies to the
   `varyk-` name, so the crate is published by the organisation;
