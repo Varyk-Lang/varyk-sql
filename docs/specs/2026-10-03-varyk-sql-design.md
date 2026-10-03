@@ -141,7 +141,8 @@ for Postgres, passed through unchanged; a program that targets two
 databases keeps two queries. Before running, the shared binding function
 compares the number of values with the number of placeholders the
 prepared statement reports, and a mismatch is an `Error` naming both
-counts. The check is the package's, not the database's: Postgres and
+counts; should a driver report no count, the check is skipped and the
+database's own applies. The check is the package's because Postgres and
 MySQL reject a mismatch themselves, but SQLite binds a missing value as
 `NULL` and ignores an extra one, which would be wrong data with no
 error.
@@ -183,15 +184,21 @@ the column.
 
 When `T` is a number, `bool`, or `string`, the row must have exactly one
 column, so `let n: i64 = db.one("select count(*) from users").await?`
-works. `Option` and `Vec` of a scalar, and a struct holding a struct, are
-not readable from a row (an `Error`); a nested type has no column.
+works, and so does `Option` of a scalar for a column that may be `NULL`
+(`let oldest: Option<i64> = db.one("select max(age) from users")`).
+`Vec` of a scalar, and a struct holding a struct, are not readable from a
+row (an `Error`); a nested type has no column.
 
 ### 2.6 Column types
 
-sqlx's `Any` driver decodes `bool`, `i16`, `i32`, `i64`, `f32`, `f64`,
-and text, and encodes the same. Those map to Varyk's types directly; an
-`i8`, `u8`, `u16`, or `u32` field is read through the next wider signed
-type and is an `Error` when the value does not fit. Any other column
+sqlx's `Any` driver decodes booleans, integers, floats, text, and bytes
+(which Varyk cannot hold), and encodes the same. The drivers do not
+agree on kinds (SQLite reports every integer as a 64-bit one and every
+float as a double, and has no boolean kind), so the deserializer applies
+one rule for all three: a number field accepts any integer or float
+column whose value fits the field's type, and is an `Error` naming the
+column when it does not; a `bool` field accepts a boolean column and an
+integer `0` or `1`; a `string` field accepts text. Any other column
 type (`uuid`, `timestamp`, `numeric`, `json`, `bytea`, arrays) is cast in
 the query, in the database's own syntax: `select id::text from ..` on
 Postgres, `select cast(id as char) from ..` on MySQL. Varyk has no
@@ -236,13 +243,13 @@ down in the README:
   text and the timing, never the values. Nothing to build.
 - **Tests.** `sql::connect_with("sqlite::memory:", 1)` in an async
   `#[test]` under `varyk test`; a test returns nothing, so it opens the
-  `Result`s with `match` and `assert`. One connection, because an
-  in-memory SQLite database belongs to the connection that opened it:
-  with more, a second connection may see no tables. With one, a query on
+  `Result`s with `match` and `assert`. sqlx gives each `:memory:` pool
+  one shared database, alive while the pool is, so the database lives
+  for one test; one connection keeps the test's queries serial, so no
+  two of them contend for SQLite's single writer. With one, a query on
   the pool while a `Tx` is open waits for the transaction's connection
   and fails after sqlx's acquire timeout, so a test finishes the
-  transaction first, and the database lives for one test: it is gone
-  when the pool is dropped. The README says all of this.
+  transaction first. The README says all of this.
 - **Health.** `db.run("select 1")` as the readiness check.
 - **Building.** The default `sqlite` feature compiles SQLite's C source
   on the first build and needs a C compiler (Xcode's command-line tools,
@@ -298,9 +305,9 @@ under `demo/`.
   adds a driver with `varyk add sql --features postgres`, and `varyk`
   passes features through (M5b2 §4.3).
 
-`src/db.rs` holds, in order: sqlx's `install_default_drivers`, which
-`Any` needs, behind a `std::sync::Once` so that `connect` runs it exactly
-once per process and no second call can panic; `Pool` wrapping `sqlx::AnyPool`, with
+`src/db.rs` holds, in order: a call to sqlx's `install_default_drivers`,
+which `Any` needs, at the top of `connect` (sqlx guards it with a `Once`,
+so repeated calls are harmless); `Pool` wrapping `sqlx::AnyPool`, with
 `#[derive(Clone)]` so Varyk's `db.clone()` works (M4 §2.10), and `Tx`
 wrapping `Option<sqlx::Transaction<'static, sqlx::Any>>`; the four
 query methods on each, sharing one binding function over `Value`; the
@@ -326,9 +333,10 @@ an ordinary crate (M3 §2.6) with `build = false` and the generated
 - `demo/users` builds and prints the expected output under `varyk run`
   on SQLite.
 - CI, in two jobs named `test` (stable) and `msrv` (1.85), the names the
-  repository's branch ruleset requires: `varyk check`, the tests on
-  SQLite, and the tests on Postgres and MySQL service containers; in
-  `test` also `rustfmt --check
+  repository's branch ruleset requires: `varyk check` and the tests on
+  SQLite in both; in `test` only, the tests on Postgres and MySQL
+  service containers (the 1.85 build gains nothing from them), `rustfmt
+  --check
   src/db.rs`, and `cargo clippy` in the crate `varyk publish
   --assemble-only` writes (plain cargo cannot build a package whose
   target is `src/lib.vr`, M5b2 §1.2); `cargo package` on that assembled
