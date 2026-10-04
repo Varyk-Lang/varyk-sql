@@ -1,0 +1,39 @@
+name: Latest varyk
+
+# An early warning, not a required check: does varyk-sql still build and
+# pass its tests with the newest varyk on crates.io? A new minor version
+# of varyk needs a varyk-sql release that moves `varyk-std` to it; this
+# job tries that move for one run, so a red run says the release is due.
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  latest-varyk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install the newest varyk
+        run: cargo install varyk --locked
+
+      - name: Require the varyk-std of that varyk
+        run: |
+          version=$(varyk --version | awk '{print $2}')
+          minor=$(echo "$version" | cut -d. -f1,2)
+          echo "varyk $version, varyk-std $minor"
+          sed -i "s/^varyk-std = \".*\"/varyk-std = \"$minor\"/" Cargo.toml
+          grep -qx "varyk-std = \"$minor\"" Cargo.toml
+
+      - name: Check
+        run: varyk check
+
+      - name: Test
+        run: varyk test

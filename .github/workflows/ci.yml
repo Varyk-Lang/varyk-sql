@@ -1,0 +1,117 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    # The suite runs on SQLite, then on these two servers, as steps of this
+    # one job so its check keeps the name `test`. TLS is off: the
+    # containers have no certificates worth checking.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: varyk
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -h 127.0.0.1 -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      mysql:
+        image: mysql:8
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: varyk
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -proot"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Install varyk
+        run: cargo install varyk --version '^0.6' --locked
+
+      - name: Check
+        run: varyk check
+
+      - name: Test
+        run: varyk test
+
+      # `varyk test` takes no `--features` and the package's default is
+      # `sqlite`, so each server leg adds its driver to the default first.
+      # `sqlite` stays on: one test always runs on `sqlite::memory:`.
+      # RUST_TEST_THREADS=1 runs the tests sharing one database one at a time.
+      - name: Test on Postgres
+        env:
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/varyk?sslmode=disable
+          RUST_TEST_THREADS: "1"
+        run: |
+          sed -i 's/^default = \["sqlite"\]$/default = ["sqlite", "postgres"]/' Cargo.toml
+          grep -qx 'default = \["sqlite", "postgres"\]' Cargo.toml
+          varyk check
+          varyk test
+          git checkout -- Cargo.toml
+
+      - name: Test on MySQL
+        env:
+          DATABASE_URL: mysql://root:root@127.0.0.1:3306/varyk?ssl-mode=DISABLED
+          RUST_TEST_THREADS: "1"
+        run: |
+          sed -i 's/^default = \["sqlite"\]$/default = ["sqlite", "mysql"]/' Cargo.toml
+          grep -qx 'default = \["sqlite", "mysql"\]' Cargo.toml
+          varyk check
+          varyk test
+          git checkout -- Cargo.toml
+
+      - name: Demo
+        working-directory: demo/users
+        run: |
+          out="$(varyk run)"
+          echo "$out"
+          test "$out" = "1 Ada"
+
+      - name: Format check
+        run: rustfmt --edition 2024 --check src/db.rs
+
+      - name: Clippy
+        run: |
+          crate="$(varyk publish --assemble-only)"
+          cd "$crate"
+          cargo clippy --all-targets -- -D warnings
+
+  msrv:
+    runs-on: ubuntu-latest
+    env:
+      # Pins every cargo call to 1.85.
+      RUSTUP_TOOLCHAIN: "1.85"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@1.85
+
+      - name: Install varyk
+        run: cargo install varyk --version '^0.6' --locked
+
+      - name: Check
+        run: varyk check
+
+      - name: Test
+        run: varyk test
