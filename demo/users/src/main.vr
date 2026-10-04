@@ -1,0 +1,30 @@
+// The users service of the README: reads `DATABASE_URL`, applies the
+// migrations, writes one user, and prints every user.
+
+struct Config {
+    database_url: string,
+}
+
+struct User {
+    id: i64,
+    name: string,
+}
+
+async fn load() -> Result<Vec<User>, Error> {
+    let config: Config = env::parse()?;
+    let db = sql::connect(config.database_url).await?;
+    db.migrate("migrations").await?;
+    db.run("insert into users (name) values (?)", "Ada").await?;
+    db.all("select id, name from users").await
+}
+
+async fn main() {
+    match load().await {
+        Ok(users) => {
+            for user in users {
+                println!("{} {}", user.id, user.name);
+            }
+        }
+        Err(e) => log::error("{}", e.message()),
+    }
+}

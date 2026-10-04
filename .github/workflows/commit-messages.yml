@@ -1,0 +1,48 @@
+name: Commit messages
+
+# release-please copies commit subjects and BREAKING CHANGE footers into the
+# release pull request and reads its body as HTML; an unclosed `<T>` there
+# hides the crate sections after it, so those crates are published but never
+# tagged (see CONTRIBUTING.md). This keeps `<` and `>` out of them.
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  no-angle-brackets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: No < or > in the title, commit subjects, or BREAKING CHANGE footers
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          # Prints a message's subject (when asked) and its BREAKING CHANGE paragraphs.
+          lines() {
+            tr -d '\r' | awk -v subject="$1" '
+              subject == "yes" && NR == 1 { print; next }
+              /^BREAKING[ -]CHANGE:/ { footer = 1 }
+              footer && /^[[:space:]]*$/ { footer = 0 }
+              footer { print }'
+          }
+          : > bad.txt
+          printf '%s\n' "$PR_TITLE" | lines yes | sed 's/^/title: /' | grep '[<>]' >> bad.txt || true
+          printf '%s\n' "$PR_BODY" | lines no | sed 's/^/description: /' | grep '[<>]' >> bad.txt || true
+          for c in $(git rev-list "$BASE..$HEAD"); do
+            git log -1 --format=%B "$c" | lines yes | sed "s/^/commit ${c:0:7}: /" | grep '[<>]' >> bad.txt || true
+          done
+          if [ -s bad.txt ]; then
+            echo "::error::< or > in a commit subject, the pull request title, or a BREAKING CHANGE footer; write 'Option of T', not 'Option<T>' (CONTRIBUTING.md)"
+            cat bad.txt
+            exit 1
+          fi

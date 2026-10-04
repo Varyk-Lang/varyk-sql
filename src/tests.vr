@@ -1,0 +1,1407 @@
+// The package's tests, run by `varyk test`. Each test connects to the
+// database `DATABASE_URL` names, or to an in-memory SQLite database when
+// it is not set, with one connection.
+
+struct Config {
+    database_url: Option<string>,
+}
+
+// The database every test uses: `DATABASE_URL`, or `sqlite::memory:`.
+fn url() -> string {
+    let parsed: Result<Config, Error> = env::parse();
+    match parsed {
+        Ok(config) => match config.database_url {
+            Some(url) => url.clone(),
+            None => "sqlite::memory:",
+        },
+        Err(_) => "sqlite::memory:",
+    }
+}
+
+#[test]
+async fn connect_with_one_connection_gives_a_pool() {
+    let opened: Result<crate::Pool, Error> = crate::connect_with(url(), 1).await;
+    match opened {
+        Ok(db) => {
+            let _other = db.clone();
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+#[test]
+async fn connect_with_no_connections_is_an_error() {
+    let opened: Result<crate::Pool, Error> = crate::connect_with(url(), 0).await;
+    match opened {
+        Ok(_) => assert(false),
+        Err(e) => assert(e.message().contains("at least one connection")),
+    }
+}
+
+#[test]
+async fn unreachable_database_is_an_error_without_the_path() {
+    let opened: Result<crate::Pool, Error> = crate::connect("sqlite:///no/such/dir/x.db").await;
+    match opened {
+        Ok(_) => assert(false),
+        Err(e) => {
+            assert(!e.message().contains("/no/such/dir"));
+            assert(!e.message().contains("x.db"));
+        }
+    }
+}
+
+#[test]
+async fn missing_driver_is_an_error_without_the_url() {
+    let opened: Result<crate::Pool, Error> = crate::connect("postgres://u:secret@h/d").await;
+    match opened {
+        Ok(_) => assert(false),
+        Err(e) => {
+            assert(!e.message().contains("secret"));
+            assert(!e.message().contains("postgres://"));
+            assert(!e.message().contains("u:secret@h/d"));
+            if url().starts_with("sqlite:") {
+                assert(e.message().contains("`postgres` feature"));
+            }
+        }
+    }
+}
+
+#[test]
+async fn malformed_url_is_an_error_without_the_url() {
+    let opened: Result<crate::Pool, Error> = crate::connect("sqlite://u:secret@[bad").await;
+    match opened {
+        Ok(_) => assert(false),
+        Err(e) => {
+            assert(!e.message().contains("secret"));
+            assert(!e.message().contains("[bad"));
+        }
+    }
+}
+
+// The rows the query tests read. Each test keys its rows by its own name
+// in `test` and deletes them first, so a shared server database and a
+// rerun do not collide.
+struct User {
+    id: i64,
+    name: string,
+    age: Option<i64>,
+}
+
+struct Aged {
+    name: string,
+    age: i64,
+}
+
+struct Renamed {
+    #[rename("name")]
+    title: string,
+}
+
+struct Flag {
+    active: bool,
+}
+
+struct Small {
+    age: i8,
+}
+
+struct AgeAsFloat {
+    age: f64,
+}
+
+struct ScoreAsInt {
+    score: i64,
+}
+
+struct Inner {
+    id: i64,
+}
+
+struct Outer {
+    part: Inner,
+}
+
+fn pg() -> bool {
+    url().starts_with("postgres")
+}
+
+// A pool with the schema applied and the rows of `test` deleted.
+async fn ready(test: string) -> Result<crate::Pool, Error> {
+    let db = crate::connect_with(url(), 1).await?;
+    let _migrated = db.migrate("migrations").await?;
+    let _deleted: u64 = if pg() {
+        db.run("delete from users where test = $1", test).await?
+    } else {
+        db.run("delete from users where test = ?", test).await?
+    };
+    Ok(db)
+}
+
+#[test]
+async fn run_gives_the_rows_changed() {
+    let opened: Result<crate::Pool, Error> = ready("run_gives_the_rows_changed").await;
+    match opened {
+        Ok(db) => {
+            let added: Result<u64, Error> = db.run("insert into users (test, id, name, age) values ('run_gives_the_rows_changed', 1, 'Ada', 36), ('run_gives_the_rows_changed', 2, 'Alan', 41)").await;
+            match added {
+                Ok(n) => assert_eq(n, 2),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            let changed: Result<u64, Error> = db.run("update users set age = 50 where test = 'run_gives_the_rows_changed' and id = 2").await;
+            match changed {
+                Ok(n) => assert_eq(n, 1),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+#[test]
+async fn all_reads_rows_by_column_name_and_ignores_extra_columns() {
+    let opened: Result<crate::Pool, Error> = ready("all_reads_rows").await;
+    match opened {
+        Ok(db) => {
+            let added: Result<u64, Error> = db.run("insert into users (test, id, name, age, nick) values ('all_reads_rows', 1, 'Ada', 36, 'ada'), ('all_reads_rows', 2, 'Alan', null, null)").await;
+            assert(added.is_ok());
+            let read: Result<Vec<User>, Error> = db.all("select nick, age, name, test, id from users where test = 'all_reads_rows' order by id").await;
+            match read {
+                Ok(users) => {
+                    assert_eq(users.len(), 2);
+                    assert_eq(users[0].id, 1);
+                    assert_eq(users[0].name, "Ada");
+                    assert(users[0].age == Some(36));
+                    assert_eq(users[1].name, "Alan");
+                    assert(!users[1].age.is_some());
+                }
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            let none: Result<Vec<User>, Error> = db.all("select id, name, age from users where test = 'no_such_test'").await;
+            match none {
+                Ok(users) => assert_eq(users.len(), 0),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+#[test]
+async fn one_reads_a_struct_a_scalar_and_an_optional_scalar() {
+    let opened: Result<crate::Pool, Error> = ready("one_reads").await;
+    match opened {
+        Ok(db) => {
+            let added: Result<u64, Error> = db.run("insert into users (test, id, name, age) values ('one_reads', 1, 'Ada', 36)").await;
+            assert(added.is_ok());
+            let user: Result<User, Error> = db.one("select id, name, age from users where test = 'one_reads'").await;
+            match user {
+                Ok(u) => {
+                    assert_eq(u.id, 1);
+                    assert_eq(u.name, "Ada");
+                }
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            let count: Result<i64, Error> = db.one("select count(*) from users where test = 'one_reads'").await;
+            match count {
+                Ok(n) => assert_eq(n, 1),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            let name: Result<string, Error> = db.one("select name from users where test = 'one_reads'").await;
+            match name {
+                Ok(n) => assert_eq(n, "Ada"),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            let oldest: Result<Option<i64>, Error> = db.one("select max(age) from users where test = 'no_such_test'").await;
+            match oldest {
+                Ok(age) => assert(!age.is_some()),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            let two: Result<i64, Error> = db.one("select id, age from users where test = 'one_reads'").await;
+            match two {
+                Ok(_) => assert(false),
+                Err(e) => assert(e.message().contains("one column") && e.message().contains("2")),
+            }
+            let maybe: Result<Option<User>, Error> = db.one("select id, name, age from users where test = 'one_reads'").await;
+            match maybe {
+                Ok(_) => assert(false),
+                Err(e) => assert_eq(e.message(), "a row read as one value must have one column; this one has 3; to read a row that may be missing, use `first`"),
+            }
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+#[test]
+async fn first_gives_none_on_no_row_and_the_first_of_two() {
+    let opened: Result<crate::Pool, Error> = ready("first_rows").await;
+    match opened {
+        Ok(db) => {
+            let missing: Result<Option<User>, Error> = db.first("select id, name, age from users where test = 'first_rows'").await;
+            match missing {
+                Ok(found) => assert(!found.is_some()),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            let added: Result<u64, Error> = db.run("insert into users (test, id, name) values ('first_rows', 1, 'Ada'), ('first_rows', 2, 'Alan')").await;
+            assert(added.is_ok());
+            let found: Result<Option<User>, Error> = db.first("select id, name, age from users where test = 'first_rows' order by id").await;
+            match found {
+                Ok(Some(u)) => assert_eq(u.name, "Ada"),
+                Ok(None) => assert(false),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            let one: Result<User, Error> = db.one("select id, name, age from users where test = 'first_rows' order by id").await;
+            match one {
+                Ok(u) => assert_eq(u.name, "Ada"),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+#[test]
+async fn one_on_no_row_is_an_error() {
+    let opened: Result<crate::Pool, Error> = ready("one_on_no_row").await;
+    match opened {
+        Ok(db) => {
+            let user: Result<User, Error> = db.one("select id, name, age from users where test = 'one_on_no_row'").await;
+            match user {
+                Ok(_) => assert(false),
+                Err(e) => assert_eq(e.message(), "the query gave no row"),
+            }
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+#[test]
+async fn null_reads_as_none_and_is_an_error_naming_the_column_otherwise() {
+    let opened: Result<crate::Pool, Error> = ready("null_reads").await;
+    match opened {
+        Ok(db) => {
+            let added: Result<u64, Error> = db.run("insert into users (test, id, name) values ('null_reads', 1, 'Ada')").await;
+            assert(added.is_ok());
+            let user: Result<User, Error> = db.one("select id, name, age from users where test = 'null_reads'").await;
+            match user {
+                Ok(u) => assert(!u.age.is_some()),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            let aged: Result<Aged, Error> = db.one("select name, age from users where test = 'null_reads'").await;
+            match aged {
+                Ok(_) => assert(false),
+                Err(e) => assert(e.message().contains("`age`") && e.message().contains("NULL")),
+            }
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+#[test]
+async fn a_missing_column_is_an_error_naming_the_field() {
+    let opened: Result<crate::Pool, Error> = ready("missing_column").await;
+    match opened {
+        Ok(db) => {
+            let added: Result<u64, Error> = db.run("insert into users (test, id, name) values ('missing_column', 1, 'Ada')").await;
+            assert(added.is_ok());
+            let user: Result<User, Error> = db.one("select name, age from users where test = 'missing_column'").await;
+            match user {
+                Ok(_) => assert(false),
+                Err(e) => assert(e.message().contains("`id`")),
+            }
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+#[test]
+async fn rename_maps_a_field_to_a_column() {
+    let opened: Result<crate::Pool, Error> = ready("rename_maps").await;
+    match opened {
+        Ok(db) => {
+            let added: Result<u64, Error> = db.run("insert into users (test, id, name) values ('rename_maps', 1, 'Ada')").await;
+            assert(added.is_ok());
+            let read: Result<Renamed, Error> = db.one("select name from users where test = 'rename_maps'").await;
+            match read {
+                Ok(r) => assert_eq(r.title, "Ada"),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+#[test]
+async fn a_bool_field_reads_zero_and_one() {
+    let opened: Result<crate::Pool, Error> = ready("bool_field").await;
+    match opened {
+        Ok(db) => {
+            let added: Result<u64, Error> = db.run("insert into users (test, id, name, active) values ('bool_field', 1, 'Ada', 1), ('bool_field', 2, 'Alan', 0), ('bool_field', 3, 'Grace', 2)").await;
+            assert(added.is_ok());
+            let flags: Result<Vec<Flag>, Error> = db.all("select active from users where test = 'bool_field' and id < 3 order by id").await;
+            match flags {
+                Ok(f) => {
+                    assert_eq(f.len(), 2);
+                    assert(f[0].active);
+                    assert(!f[1].active);
+                }
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            let two: Result<Flag, Error> = db.one("select active from users where test = 'bool_field' and id = 3").await;
+            match two {
+                Ok(_) => assert(false),
+                Err(e) => assert(e.message().contains("`active`")),
+            }
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+#[test]
+async fn an_integer_out_of_the_field_range_is_an_error_naming_the_column() {
+    let opened: Result<crate::Pool, Error> = ready("out_of_range").await;
+    match opened {
+        Ok(db) => {
+            let added: Result<u64, Error> = db.run("insert into users (test, id, name, age) values ('out_of_range', 1, 'Ada', 300), ('out_of_range', 2, 'Alan', 100)").await;
+            assert(added.is_ok());
+            let small: Result<Small, Error> = db.one("select age from users where test = 'out_of_range' and id = 1").await;
+            match small {
+                Ok(_) => assert(false),
+                Err(e) => assert(e.message().contains("`age`") && e.message().contains("range of an `i8`")),
+            }
+            let fits: Result<Small, Error> = db.one("select age from users where test = 'out_of_range' and id = 2").await;
+            match fits {
+                Ok(s) => assert_eq(s.age, 100),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+#[test]
+async fn a_list_or_a_nested_struct_is_not_read_from_a_row() {
+    let opened: Result<crate::Pool, Error> = ready("not_from_a_row").await;
+    match opened {
+        Ok(db) => {
+            let added: Result<u64, Error> = db.run("insert into users (test, id, name) values ('not_from_a_row', 1, 'Ada')").await;
+            assert(added.is_ok());
+            let list: Result<Vec<i64>, Error> = db.one("select id from users where test = 'not_from_a_row'").await;
+            assert(list.is_err());
+            let nested: Result<Outer, Error> = db.one("select id as part from users where test = 'not_from_a_row'").await;
+            match nested {
+                Ok(_) => assert(false),
+                Err(e) => assert(e.message().contains("`part`")),
+            }
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+#[test]
+async fn zero_one_and_three_values_bind() {
+    let opened: Result<crate::Pool, Error> = ready("values_bind").await;
+    match opened {
+        Ok(db) => {
+            let name = "Ada";
+            let age: i64 = 36;
+            let added: Result<u64, Error> = if pg() {
+                db.run("insert into users (test, id, name, age) values ('values_bind', $1, $2, $3)", 1, name, age).await
+            } else {
+                db.run("insert into users (test, id, name, age) values ('values_bind', ?, ?, ?)", 1, name, age).await
+            };
+            match added {
+                Ok(n) => assert_eq(n, 1),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            let count: Result<i64, Error> = db.one("select count(*) from users where test = 'values_bind'").await;
+            match count {
+                Ok(n) => assert_eq(n, 1),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            let read: Result<string, Error> = if pg() {
+                db.one("select name from users where test = 'values_bind' and age = $1", 36).await
+            } else {
+                db.one("select name from users where test = 'values_bind' and age = ?", 36).await
+            };
+            match read {
+                Ok(n) => assert_eq(n, "Ada"),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            let flag = true;
+            let score = 1.5;
+            let more: Result<u64, Error> = if pg() {
+                db.run("update users set done = $1, score = $2 where test = 'values_bind'", flag, score).await
+            } else {
+                db.run("update users set done = ?, score = ? where test = 'values_bind'", flag, score).await
+            };
+            match more {
+                Ok(n) => assert_eq(n, 1),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+#[test]
+async fn a_none_value_binds_null() {
+    let opened: Result<crate::Pool, Error> = ready("none_binds_null").await;
+    match opened {
+        Ok(db) => {
+            let nick: Option<string> = None;
+            let added: Result<u64, Error> = if pg() {
+                db.run("insert into users (test, id, name, nick) values ('none_binds_null', 1, 'Ada', $1)", nick).await
+            } else {
+                db.run("insert into users (test, id, name, nick) values ('none_binds_null', 1, 'Ada', ?)", nick).await
+            };
+            assert(added.is_ok());
+            let read: Result<Option<string>, Error> = db.one("select nick from users where test = 'none_binds_null'").await;
+            match read {
+                Ok(n) => assert(!n.is_some()),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            let nulls: Result<i64, Error> = db.one("select count(*) from users where test = 'none_binds_null' and nick is null").await;
+            match nulls {
+                Ok(n) => assert_eq(n, 1),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+// Sets the nick of row 1 of `none_then_text`, always with the same query
+// text, so each call runs the statement the first one ran.
+async fn set_nick(db: crate::Pool, nick: Option<string>) -> Result<u64, Error> {
+    if pg() {
+        db.run("update users set nick = $1 where test = 'none_then_text' and id = 1", nick).await
+    } else {
+        db.run("update users set nick = ? where test = 'none_then_text' and id = 1", nick).await
+    }
+}
+
+// Sets the score of row 1 of `none_then_text` the same way.
+async fn set_score(db: crate::Pool, score: Option<f64>) -> Result<u64, Error> {
+    if pg() {
+        db.run("update users set score = $1 where test = 'none_then_text' and id = 1", score).await
+    } else {
+        db.run("update users set score = ? where test = 'none_then_text' and id = 1", score).await
+    }
+}
+
+// A statement first run with `None` and then with a value stores the
+// value: on Postgres a `None` binds as an integer, and a statement kept
+// prepared with that type would take the next value's bytes as one.
+#[test]
+async fn a_statement_run_with_none_then_a_value_stores_the_value() {
+    let opened: Result<crate::Pool, Error> = ready("none_then_text").await;
+    match opened {
+        Ok(db) => {
+            let added: Result<u64, Error> = db.run("insert into users (test, id, name) values ('none_then_text', 1, 'Ada')").await;
+            assert(added.is_ok());
+            let cleared: Result<u64, Error> = set_nick(db, None).await;
+            match cleared {
+                Ok(n) => assert_eq(n, 1),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            let long: Result<u64, Error> = set_nick(db, Some("abcdefgh")).await;
+            match long {
+                Ok(n) => assert_eq(n, 1),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            let read_long: Result<Option<string>, Error> = db.one("select nick from users where test = 'none_then_text'").await;
+            match read_long {
+                Ok(n) => assert(n == Some("abcdefgh")),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            let short: Result<u64, Error> = set_nick(db, Some("ann")).await;
+            match short {
+                Ok(n) => assert_eq(n, 1),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            let read_short: Result<Option<string>, Error> = db.one("select nick from users where test = 'none_then_text'").await;
+            match read_short {
+                Ok(n) => assert(n == Some("ann")),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            let no_score: Result<u64, Error> = set_score(db, None).await;
+            match no_score {
+                Ok(n) => assert_eq(n, 1),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            let scored: Result<u64, Error> = set_score(db, Some(1.5)).await;
+            match scored {
+                Ok(n) => assert_eq(n, 1),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            let read_score: Result<Option<f64>, Error> = db.one("select score from users where test = 'none_then_text'").await;
+            match read_score {
+                Ok(s) => assert(s == Some(1.5)),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+// Sets `done` of row 1 of `nullable_boolean` through the Postgres cast
+// the README gives for a boolean that may be `None`.
+async fn set_done(db: crate::Pool, done: Option<bool>) -> Result<u64, Error> {
+    db.run("update users set done = $1::text::boolean where test = 'nullable_boolean' and id = 1", done).await
+}
+
+// On Postgres a nullable boolean column takes `None` and `true` through
+// `$1::text::boolean`.
+#[test]
+async fn a_postgres_boolean_takes_none_and_true_through_a_text_cast() {
+    if !pg() {
+        return;
+    }
+    let opened: Result<crate::Pool, Error> = ready("nullable_boolean").await;
+    match opened {
+        Ok(db) => {
+            let added: Result<u64, Error> = db.run("insert into users (test, id, name, done) values ('nullable_boolean', 1, 'Ada', true)").await;
+            assert(added.is_ok());
+            let cleared: Result<u64, Error> = set_done(db, None).await;
+            match cleared {
+                Ok(n) => assert_eq(n, 1),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            let read_none: Result<Option<bool>, Error> = db.one("select done from users where test = 'nullable_boolean'").await;
+            match read_none {
+                Ok(d) => assert(!d.is_some()),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            let set: Result<u64, Error> = set_done(db, Some(true)).await;
+            match set {
+                Ok(n) => assert_eq(n, 1),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            let read_true: Result<Option<bool>, Error> = db.one("select done from users where test = 'nullable_boolean'").await;
+            match read_true {
+                Ok(d) => assert(d == Some(true)),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+// The names of the rows of `optional_filter` whose name is `name`, or of
+// all of them when it is `None`, through the Postgres text cast.
+async fn names_named(db: crate::Pool, name: Option<string>) -> Result<Vec<string>, Error> {
+    db.all("select name from users where test = 'optional_filter' and ($1::text is null or name = $1::text) order by id", name).await
+}
+
+// On Postgres a `None` compared with a text column is cast to `text`; a
+// plain `$1` is an integer and has no `=` with `varchar`.
+#[test]
+async fn a_postgres_optional_filter_takes_none_and_a_value_through_a_text_cast() {
+    if !pg() {
+        return;
+    }
+    let opened: Result<crate::Pool, Error> = ready("optional_filter").await;
+    match opened {
+        Ok(db) => {
+            let added: Result<u64, Error> = db.run("insert into users (test, id, name) values ('optional_filter', 1, 'Ada'), ('optional_filter', 2, 'Alan')").await;
+            assert(added.is_ok());
+            let every: Result<Vec<string>, Error> = names_named(db, None).await;
+            match every {
+                Ok(names) => assert_eq(names.len(), 2),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            let one: Result<Vec<string>, Error> = names_named(db, Some("Alan")).await;
+            match one {
+                Ok(names) => {
+                    assert_eq(names.len(), 1);
+                    assert_eq(names[0], "Alan");
+                }
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+#[test]
+async fn too_few_values_are_an_error_and_too_many_one_off_postgres() {
+    let opened: Result<crate::Pool, Error> = ready("value_counts").await;
+    match opened {
+        Ok(db) => {
+            let few: Result<Option<User>, Error> = if pg() {
+                db.first("select id, name, age from users where id = $1 and name = $2", 1).await
+            } else {
+                db.first("select id, name, age from users where id = ? and name = ?", 1).await
+            };
+            match few {
+                Ok(_) => assert(false),
+                Err(e) => assert(pg() || e.message() == "the query has 2 placeholders but was given 1 value"),
+            }
+            let many: Result<u64, Error> = if pg() {
+                db.run("delete from users where id = $1", 1, 2, 3).await
+            } else {
+                db.run("delete from users where id = ?", 1, 2, 3).await
+            };
+            // Postgres ignores an extra value; the check runs on SQLite and MySQL.
+            match many {
+                Ok(_) => assert(pg()),
+                Err(e) => assert_eq(e.message(), "the query has 1 placeholder but was given 3 values"),
+            }
+            let none: Result<Vec<User>, Error> = if pg() {
+                db.all("select id, name, age from users where id = $1").await
+            } else {
+                db.all("select id, name, age from users where id = ?").await
+            };
+            match none {
+                Ok(_) => assert(false),
+                Err(e) => assert(pg() || e.message() == "the query has 1 placeholder but was given 0 values"),
+            }
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+#[test]
+async fn text_into_an_integer_column_is_a_database_error() {
+    let opened: Result<crate::Pool, Error> = ready("text_into_integer").await;
+    match opened {
+        Ok(db) => {
+            let added: Result<u64, Error> = if pg() {
+                db.run("insert into users (test, id, name, age) values ('text_into_integer', 1, 'Ada', $1)", "abc").await
+            } else {
+                db.run("insert into users (test, id, name, age) values ('text_into_integer', 1, 'Ada', ?)", "abc").await
+            };
+            if url().starts_with("sqlite:") {
+                // SQLite keeps the text in an integer column.
+                match added {
+                    Ok(n) => assert_eq(n, 1),
+                    Err(e) => assert_eq(e.message(), "no error"),
+                }
+            } else {
+                match added {
+                    Ok(_) => assert(false),
+                    Err(e) => assert(!e.message().is_empty()),
+                }
+            }
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+#[test]
+async fn an_integer_column_reads_into_a_float_field() {
+    let opened: Result<crate::Pool, Error> = ready("integer_into_float").await;
+    match opened {
+        Ok(db) => {
+            let added: Result<u64, Error> = db.run("insert into users (test, id, name, age) values ('integer_into_float', 1, 'Ada', 36)").await;
+            assert(added.is_ok());
+            let read: Result<AgeAsFloat, Error> = db.one("select age from users where test = 'integer_into_float'").await;
+            match read {
+                Ok(a) => assert(a.age == 36.0),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+#[test]
+async fn a_float_column_reads_into_an_integer_field_only_when_whole() {
+    let opened: Result<crate::Pool, Error> = ready("float_into_integer").await;
+    match opened {
+        Ok(db) => {
+            let added: Result<u64, Error> = db.run("insert into users (test, id, name, score) values ('float_into_integer', 1, 'Ada', 1.5), ('float_into_integer', 2, 'Alan', 2.0)").await;
+            assert(added.is_ok());
+            let fraction: Result<ScoreAsInt, Error> = db.one("select score from users where test = 'float_into_integer' and id = 1").await;
+            match fraction {
+                Ok(_) => assert(false),
+                Err(e) => assert(e.message().contains("`score`")),
+            }
+            let whole: Result<ScoreAsInt, Error> = db.one("select score from users where test = 'float_into_integer' and id = 2").await;
+            match whole {
+                Ok(s) => assert_eq(s.score, 2),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+// Transactions. Each helper takes the pool's only connection for its
+// transaction, and commits it or drops it before it returns, so the
+// test's next query on the pool can have the connection.
+
+// Writes one row in a transaction and commits it.
+async fn write_and_commit(db: crate::Pool) -> Result<bool, Error> {
+    let mut tx = db.begin().await?;
+    let _added = tx.run("insert into users (test, id, name) values ('tx_commit', 1, 'Ada')").await?;
+    tx.commit().await
+}
+
+// Writes one row in a transaction and drops it without `commit`.
+async fn write_and_drop(db: crate::Pool) -> Result<u64, Error> {
+    let mut tx = db.begin().await?;
+    tx.run("insert into users (test, id, name) values ('tx_drop', 1, 'Ada')").await
+}
+
+// Commits a transaction twice; the second gives what this returns.
+async fn commit_twice(db: crate::Pool) -> Result<bool, Error> {
+    let mut tx = db.begin().await?;
+    let _first = tx.commit().await?;
+    tx.commit().await
+}
+
+// Runs a query on a transaction after its `commit`.
+async fn query_after_commit(db: crate::Pool) -> Result<Option<User>, Error> {
+    let mut tx = db.begin().await?;
+    let _done = tx.commit().await?;
+    tx.first("select id, name, age from users where test = 'tx_after'").await
+}
+
+// What `write_and_read_back` read: the row through `one`, and every row
+// through `all`.
+struct ReadBack {
+    read: User,
+    all: Vec<User>,
+}
+
+// Writes a row in a transaction and reads it back in the same one.
+async fn write_and_read_back(db: crate::Pool) -> Result<ReadBack, Error> {
+    let mut tx = db.begin().await?;
+    let _added = tx.run("insert into users (test, id, name) values ('tx_read_back', 1, 'Ada')").await?;
+    let read: User = tx.one("select id, name, age from users where test = 'tx_read_back'").await?;
+    let all: Vec<User> = tx.all("select id, name, age from users where test = 'tx_read_back'").await?;
+    let _done = tx.commit().await?;
+    Ok(ReadBack { read: read, all: all })
+}
+
+// Runs a query with one value too many inside a transaction.
+async fn too_many_in_a_tx(db: crate::Pool) -> Result<Option<User>, Error> {
+    let mut tx = db.begin().await?;
+    tx.first("select id, name, age from users where test = ?", "tx_count", 1).await
+}
+
+#[test]
+async fn a_committed_transaction_keeps_its_rows() {
+    let opened: Result<crate::Pool, Error> = ready("tx_commit").await;
+    match opened {
+        Ok(db) => {
+            let committed: Result<bool, Error> = write_and_commit(db).await;
+            match committed {
+                Ok(done) => assert(done),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            let found: Result<Option<User>, Error> = db.first("select id, name, age from users where test = 'tx_commit'").await;
+            match found {
+                Ok(Some(u)) => assert_eq(u.name, "Ada"),
+                Ok(None) => assert(false),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+#[test]
+async fn a_dropped_transaction_leaves_no_row() {
+    let opened: Result<crate::Pool, Error> = ready("tx_drop").await;
+    match opened {
+        Ok(db) => {
+            let written: Result<u64, Error> = write_and_drop(db).await;
+            match written {
+                Ok(n) => assert_eq(n, 1),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            let found: Result<Option<User>, Error> = db.first("select id, name, age from users where test = 'tx_drop'").await;
+            match found {
+                Ok(row) => assert(!row.is_some()),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+#[test]
+async fn a_finished_transaction_refuses_commit_and_queries() {
+    let opened: Result<crate::Pool, Error> = ready("tx_after").await;
+    match opened {
+        Ok(db) => {
+            let twice: Result<bool, Error> = commit_twice(db).await;
+            match twice {
+                Ok(_) => assert(false),
+                Err(e) => assert_eq(e.message(), "this transaction is finished"),
+            }
+            let after: Result<Option<User>, Error> = query_after_commit(db).await;
+            match after {
+                Ok(_) => assert(false),
+                Err(e) => assert_eq(e.message(), "this transaction is finished"),
+            }
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+#[test]
+async fn a_transaction_reads_its_own_write() {
+    let opened: Result<crate::Pool, Error> = ready("tx_read_back").await;
+    match opened {
+        Ok(db) => {
+            let read: Result<ReadBack, Error> = write_and_read_back(db).await;
+            match read {
+                Ok(back) => {
+                    assert_eq(back.read.id, 1);
+                    assert_eq(back.read.name, "Ada");
+                    assert_eq(back.all.len(), 1);
+                }
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+// Handles the package's count error in a transaction, then writes a row
+// and commits: the count error leaves the transaction as it was.
+async fn commit_after_a_count_error(db: crate::Pool) -> Result<bool, Error> {
+    let mut tx = db.begin().await?;
+    let counted: Result<Option<User>, Error> = tx.first("select id, name, age from users where test = ?", "tx_count", 1).await;
+    if counted.is_ok() {
+        return Err(Error::new("the extra value was accepted"));
+    }
+    let _added = tx.run("insert into users (test, id, name) values ('tx_count', 1, 'Ada')").await?;
+    tx.commit().await
+}
+
+#[test]
+async fn a_transaction_checks_the_placeholder_count() {
+    if pg() {
+        return;
+    }
+    let opened: Result<crate::Pool, Error> = ready("tx_count").await;
+    match opened {
+        Ok(db) => {
+            let read: Result<Option<User>, Error> = too_many_in_a_tx(db).await;
+            match read {
+                Ok(_) => assert(false),
+                Err(e) => assert_eq(e.message(), "the query has 1 placeholder but was given 2 values"),
+            }
+            let committed: Result<bool, Error> = commit_after_a_count_error(db).await;
+            match committed {
+                Ok(done) => assert(done),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            let rows: Result<i64, Error> = db.one("select count(*) from users where test = 'tx_count'").await;
+            match rows {
+                Ok(n) => assert_eq(n, 1),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+// Writes a row in a transaction, handles a duplicate-key failure, checks
+// that the next statement is refused without running, commits, and
+// checks that a query after the commit is refused as finished; the
+// commit gives what this returns.
+async fn commit_after_a_handled_failure(db: crate::Pool) -> Result<bool, Error> {
+    let mut tx = db.begin().await?;
+    let _added = tx.run("insert into users (test, id, name) values ('tx_failed', 1, 'Ada')").await?;
+    let again: Result<u64, Error> = tx.run("insert into users (test, id, name) values ('tx_failed', 1, 'Ada')").await;
+    if again.is_ok() {
+        return Err(Error::new("the duplicate insert succeeded"));
+    }
+    let next: Result<u64, Error> = tx.run("insert into users (test, id, name) values ('tx_failed', 2, 'Alan')").await;
+    let refused = match next {
+        Ok(_) => false,
+        Err(e) => e.message() == "a statement in this transaction failed; it will roll back",
+    };
+    if !refused {
+        return Err(Error::new("the statement after the failure was not refused"));
+    }
+    let committed: Result<bool, Error> = tx.commit().await;
+    let after: Result<u64, Error> = tx.run("insert into users (test, id, name) values ('tx_failed', 3, 'Grace')").await;
+    let finished = match after {
+        Ok(_) => false,
+        Err(e) => e.message() == "this transaction is finished",
+    };
+    if !finished {
+        return Err(Error::new("the query after the commit was not refused as finished"));
+    }
+    committed
+}
+
+#[test]
+async fn a_commit_after_a_failed_statement_rolls_back_and_is_an_error() {
+    let opened: Result<crate::Pool, Error> = ready("tx_failed").await;
+    match opened {
+        Ok(db) => {
+            let committed: Result<bool, Error> = commit_after_a_handled_failure(db).await;
+            match committed {
+                Ok(_) => assert(false),
+                Err(e) => assert_eq(e.message(), "the transaction was rolled back: a statement in it failed"),
+            }
+            let rows: Result<i64, Error> = db.one("select count(*) from users where test = 'tx_failed'").await;
+            match rows {
+                Ok(n) => assert_eq(n, 0),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+// Writes a row in a transaction, handles a statement that fails after
+// its first row, and commits; the commit gives what this returns.
+async fn commit_after_a_late_failure(db: crate::Pool) -> Result<bool, Error> {
+    let mut tx = db.begin().await?;
+    let _added = tx.run("insert into users (test, id, name) values ('late_failure', 1, 'Ada')").await?;
+    let late: Result<Option<i64>, Error> = if pg() {
+        tx.first("select (1 / (x - 2))::bigint from generate_series(1, 3) x").await
+    } else {
+        tx.first("select cast(1 as signed) from (select 1 x union all select 2) t where (select 1 from dual where t.x > 1 union all select 2 from dual where t.x > 1) is null").await
+    };
+    if late.is_ok() {
+        return Err(Error::new("the statement that fails on its second row gave Ok"));
+    }
+    tx.commit().await
+}
+
+// On Postgres and MySQL a statement that fails after its first row is an
+// `Error` from `first`, on the pool and in a transaction, which it fails,
+// and the connection's next statement works. MySQL turns `1 / 0` into
+// `NULL`, so there a subquery gives two rows for the second row.
+#[test]
+async fn a_statement_failing_after_its_first_row_is_an_error() {
+    if url().starts_with("sqlite:") {
+        return;
+    }
+    let opened: Result<crate::Pool, Error> = ready("late_failure").await;
+    match opened {
+        Ok(db) => {
+            let late: Result<Option<i64>, Error> = if pg() {
+                db.first("select (1 / (x - 2))::bigint from generate_series(1, 3) x").await
+            } else {
+                db.first("select cast(1 as signed) from (select 1 x union all select 2) t where (select 1 from dual where t.x > 1 union all select 2 from dual where t.x > 1) is null").await
+            };
+            match late {
+                Ok(_) => assert(false),
+                Err(e) => assert(e.message().contains("division by zero") || e.message().contains("more than 1 row")),
+            }
+            let next: Result<i64, Error> = db.one("select 7").await;
+            match next {
+                Ok(n) => assert_eq(n, 7),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            let committed: Result<bool, Error> = commit_after_a_late_failure(db).await;
+            match committed {
+                Ok(_) => assert(false),
+                Err(e) => assert_eq(e.message(), "the transaction was rolled back: a statement in it failed"),
+            }
+            let rows: Result<i64, Error> = db.one("select count(*) from users where test = 'late_failure'").await;
+            match rows {
+                Ok(n) => assert_eq(n, 0),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+// Writes a row in a transaction, handles a statement on a missing table,
+// and commits; the commit gives what this returns.
+async fn commit_after_a_missing_table(db: crate::Pool) -> Result<bool, Error> {
+    let mut tx = db.begin().await?;
+    let _added = tx.run("insert into users (test, id, name) values ('tx_missing_table', 1, 'Ada')").await?;
+    let missing: Result<u64, Error> = tx.run("insert into no_such_table (id) values (1)").await;
+    if missing.is_ok() {
+        return Err(Error::new("the insert into a missing table succeeded"));
+    }
+    tx.commit().await
+}
+
+// A statement the database refuses to prepare fails the transaction on
+// every database, as one it refuses to run does.
+#[test]
+async fn a_statement_on_a_missing_table_fails_the_transaction() {
+    let opened: Result<crate::Pool, Error> = ready("tx_missing_table").await;
+    match opened {
+        Ok(db) => {
+            let committed: Result<bool, Error> = commit_after_a_missing_table(db).await;
+            match committed {
+                Ok(_) => assert(false),
+                Err(e) => assert_eq(e.message(), "the transaction was rolled back: a statement in it failed"),
+            }
+            let rows: Result<i64, Error> = db.one("select count(*) from users where test = 'tx_missing_table'").await;
+            match rows {
+                Ok(n) => assert_eq(n, 0),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+// Writes a row in a transaction, handles a `one` that finds no row, and
+// commits.
+async fn commit_after_a_read_error(db: crate::Pool) -> Result<bool, Error> {
+    let mut tx = db.begin().await?;
+    let _added = tx.run("insert into users (test, id, name) values ('tx_read_error', 1, 'Ada')").await?;
+    let missing: Result<User, Error> = tx.one("select id, name, age from users where test = 'tx_read_error' and id = 2").await;
+    if missing.is_ok() {
+        return Err(Error::new("the missing row was found"));
+    }
+    tx.commit().await
+}
+
+// A query that ran but whose rows could not be read leaves the
+// transaction as it was, so `commit` commits.
+#[test]
+async fn a_read_error_in_a_transaction_does_not_stop_the_commit() {
+    let opened: Result<crate::Pool, Error> = ready("tx_read_error").await;
+    match opened {
+        Ok(db) => {
+            let committed: Result<bool, Error> = commit_after_a_read_error(db).await;
+            match committed {
+                Ok(done) => assert(done),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            let rows: Result<i64, Error> = db.one("select count(*) from users where test = 'tx_read_error'").await;
+            match rows {
+                Ok(n) => assert_eq(n, 1),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+// Writes a marker row on the pool, then opens a transaction, writes a
+// row, and waits long before committing, so a test can stop it while it
+// waits. The marker shows the task started.
+async fn write_then_sleep(db: crate::Pool) -> Result<bool, Error> {
+    let _marked = db.run("insert into users (test, id, name) values ('tx_stopped', 2, 'Marker')").await?;
+    let mut tx = db.begin().await?;
+    let _added = tx.run("insert into users (test, id, name) values ('tx_stopped', 1, 'Ada')").await?;
+    time::sleep(60000).await;
+    tx.commit().await
+}
+
+// Starts `write_then_sleep`, lets it write, and returns early, which
+// stops the task at its sleep and drops its transaction. The other path
+// awaits the task, so the start is used.
+async fn start_then_leave(db: crate::Pool) -> Result<bool, Error> {
+    let task = write_then_sleep(db.clone());
+    time::sleep(300).await;
+    if url().len() > 0 {
+        return Ok(false);
+    }
+    task.await
+}
+
+#[test]
+async fn a_stopped_task_rolls_its_transaction_back() {
+    let opened: Result<crate::Pool, Error> = ready("tx_stopped").await;
+    match opened {
+        Ok(db) => {
+            let left: Result<bool, Error> = start_then_leave(db).await;
+            match left {
+                Ok(committed) => assert(!committed),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            let marker: Result<Option<User>, Error> = db.first("select id, name, age from users where test = 'tx_stopped' and id = 2").await;
+            match marker {
+                Ok(Some(u)) => assert_eq(u.name, "Marker"),
+                Ok(None) => assert(false),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            let found: Result<Option<User>, Error> = db.first("select id, name, age from users where test = 'tx_stopped' and id = 1").await;
+            match found {
+                Ok(row) => assert(!row.is_some()),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+// Migrations.
+
+#[test]
+async fn migrate_applies_the_schema_and_a_second_run_changes_nothing() {
+    let opened: Result<crate::Pool, Error> = crate::connect_with(url(), 1).await;
+    match opened {
+        Ok(db) => {
+            let first: Result<bool, Error> = db.migrate("migrations").await;
+            match first {
+                Ok(done) => assert(done),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            let rows: Result<i64, Error> = db.one("select count(*) from users where test = 'migrate_twice'").await;
+            match rows {
+                Ok(n) => assert_eq(n, 0),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            let before: Result<i64, Error> = db.one("select count(*) from _sqlx_migrations").await;
+            let second: Result<bool, Error> = db.migrate("migrations").await;
+            match second {
+                Ok(done) => assert(done),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            let after: Result<i64, Error> = db.one("select count(*) from _sqlx_migrations").await;
+            match before {
+                Ok(b) => {
+                    assert(b > 0);
+                    match after {
+                        Ok(a) => assert_eq(a, b),
+                        Err(e) => assert_eq(e.message(), "no error"),
+                    }
+                }
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+#[test]
+async fn migrate_on_a_missing_folder_is_an_error_naming_it() {
+    let opened: Result<crate::Pool, Error> = crate::connect_with(url(), 1).await;
+    match opened {
+        Ok(db) => {
+            let migrated: Result<bool, Error> = db.migrate("no_such_migrations").await;
+            match migrated {
+                Ok(_) => assert(false),
+                Err(e) => assert(e.message().contains("`no_such_migrations`")),
+            }
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+// On a fresh in-memory SQLite database on every leg: a server database
+// already holds the history of `migrations`, which this folder lacks, so
+// sqlx would stop at that before running the failing file.
+#[test]
+async fn a_failed_migration_is_an_error_naming_its_version() {
+    let opened: Result<crate::Pool, Error> = crate::connect_with("sqlite::memory:", 1).await;
+    match opened {
+        Ok(db) => {
+            let migrated: Result<bool, Error> = db.migrate("testdata/failing_migration").await;
+            match migrated {
+                Ok(_) => assert(false),
+                Err(e) => {
+                    assert(e.message().contains("migration 7"));
+                    assert(e.message().contains("no_such_table"));
+                }
+            }
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+// Migrates on a pool of its own, then stops with an `Error` so that
+// `Task::all` gives it as soon as the migration returns.
+async fn migrate_then_stop() -> Result<bool, Error> {
+    let db = crate::connect_with(url(), 1).await?;
+    let _migrated = db.migrate("migrations").await?;
+    Err(Error::new("migrated"))
+}
+
+// Gives up after twenty seconds.
+async fn give_up() -> Result<bool, Error> {
+    time::sleep(20000).await;
+    Err(Error::new("timed out"))
+}
+
+// A failed `migrate` on Postgres or MySQL releases sqlx's migration lock,
+// so another pool's `migrate` on the same database returns. The failing
+// folder lacks the versions of `migrations`, which the server database
+// holds, so sqlx stops after taking the lock.
+#[test]
+async fn a_failed_migration_releases_the_lock() {
+    if url().starts_with("sqlite:") {
+        return;
+    }
+    let opened: Result<crate::Pool, Error> = crate::connect_with(url(), 1).await;
+    match opened {
+        Ok(db) => {
+            let first: Result<bool, Error> = db.migrate("migrations").await;
+            assert(first.is_ok());
+            let failed: Result<bool, Error> = db.migrate("testdata/failing_migration").await;
+            assert(failed.is_err());
+            let raced = Task::all(vec![migrate_then_stop(), give_up()]).await;
+            match raced {
+                Ok(_) => assert(false),
+                Err(e) => assert_eq(e.message(), "migrated"),
+            }
+            let after: Result<i64, Error> = db.one("select count(*) from _sqlx_migrations").await;
+            assert(after.is_ok());
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+// An in-memory SQLite database is one database for the whole pool, even
+// with sqlx's default of ten connections: the migration, the write, and
+// the read below see the same tables.
+async fn memory_round_trip() -> Result<i64, Error> {
+    let db = crate::connect("sqlite::memory:").await?;
+    let _migrated = db.migrate("migrations").await?;
+    let _added = db.run("insert into users (test, id, name) values ('memory', 1, 'Ada')").await?;
+    let other = db.clone();
+    let _more = other.run("insert into users (test, id, name) values ('memory', 2, 'Alan')").await?;
+    db.one("select count(*) from users where test = 'memory'").await
+}
+
+#[test]
+async fn an_in_memory_database_is_one_database_for_the_pool() {
+    let counted: Result<i64, Error> = memory_round_trip().await;
+    match counted {
+        Ok(n) => assert_eq(n, 2),
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+struct Bio {
+    bio: string,
+}
+
+// MySQL reports a `text` column as bytes; UTF-8 bytes read as text.
+#[test]
+async fn a_mysql_text_column_reads_into_a_string() {
+    if !url().starts_with("mysql") {
+        return;
+    }
+    let opened: Result<crate::Pool, Error> = ready("mysql_text").await;
+    match opened {
+        Ok(db) => {
+            let added: Result<u64, Error> = db.run("insert into users (test, id, name, bio) values ('mysql_text', 1, 'Ada', concat(repeat('x', 300), ' Lovelace, née Byron'))").await;
+            assert(added.is_ok());
+            let read: Result<Bio, Error> = db.one("select bio from users where test = 'mysql_text'").await;
+            match read {
+                Ok(b) => {
+                    assert_eq(b.bio.len(), 321);
+                    assert(b.bio.contains(" Lovelace, née Byron"));
+                }
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+// MySQL reads an unsigned integer as signed, so the README's cast reads
+// one at or above 2^31 (or 2^63) correctly. The table is the session's
+// own, on the test's one connection.
+#[test]
+async fn a_mysql_unsigned_integer_reads_through_the_documented_cast() {
+    if !url().starts_with("mysql") {
+        return;
+    }
+    let opened: Result<crate::Pool, Error> = crate::connect_with(url(), 1).await;
+    match opened {
+        Ok(db) => {
+            let made: Result<u64, Error> = db.run("create temporary table unsigned_values (tiny smallint unsigned, small int unsigned, big bigint unsigned)").await;
+            assert(made.is_ok());
+            let added: Result<u64, Error> = db.run("insert into unsigned_values (tiny, small, big) values (65535, 3000000000, 18446744073709551615)").await;
+            assert(added.is_ok());
+            let tiny: Result<i64, Error> = db.one("select cast(tiny as signed) from unsigned_values").await;
+            match tiny {
+                Ok(n) => assert_eq(n, 65535),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            let small: Result<i64, Error> = db.one("select cast(small as signed) from unsigned_values").await;
+            match small {
+                Ok(n) => assert_eq(n, 3000000000),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            let big: Result<string, Error> = db.one("select cast(big as char) from unsigned_values").await;
+            match big {
+                Ok(text) => assert_eq(text, "18446744073709551615"),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+// Inserts two rows of `new_ids` in a transaction and gives the id
+// `last_insert_id()` read after each, on the transaction's connection.
+async fn insert_and_read_ids(db: crate::Pool) -> Result<Vec<i64>, Error> {
+    let mut tx = db.begin().await?;
+    let _first = tx.run("insert into new_ids (name) values (?)", "Ada").await?;
+    let one: i64 = tx.one("select last_insert_id()").await?;
+    let _second = tx.run("insert into new_ids (name) values (?)", "Alan").await?;
+    let two: i64 = tx.one("select last_insert_id()").await?;
+    let _done = tx.commit().await?;
+    Ok(vec![one, two])
+}
+
+// On MySQL a generated id is read with `last_insert_id()` inside the
+// inserting transaction. The table is the session's own, on the test's
+// one connection, which the transaction takes.
+#[test]
+async fn a_mysql_generated_id_reads_inside_the_transaction() {
+    if !url().starts_with("mysql") {
+        return;
+    }
+    let opened: Result<crate::Pool, Error> = crate::connect_with(url(), 1).await;
+    match opened {
+        Ok(db) => {
+            let made: Result<u64, Error> = db.run("create temporary table new_ids (id integer primary key auto_increment, name varchar(100) not null)").await;
+            assert(made.is_ok());
+            let ids: Result<Vec<i64>, Error> = insert_and_read_ids(db).await;
+            match ids {
+                Ok(read) => {
+                    assert_eq(read.len(), 2);
+                    assert_eq(read[0], 1);
+                    assert_eq(read[1], 2);
+                }
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+// On Postgres and SQLite a generated id is read with `returning id`
+// through `one`. The table is the session's own, on the test's one
+// connection.
+#[test]
+async fn a_generated_id_reads_through_returning() {
+    if url().starts_with("mysql") {
+        return;
+    }
+    let opened: Result<crate::Pool, Error> = crate::connect_with(url(), 1).await;
+    match opened {
+        Ok(db) => {
+            let made: Result<u64, Error> = if pg() {
+                db.run("create temporary table new_ids (id integer primary key generated always as identity, name text not null)").await
+            } else {
+                db.run("create temporary table new_ids (id integer primary key, name text not null)").await
+            };
+            assert(made.is_ok());
+            let first: Result<i64, Error> = if pg() {
+                db.one("insert into new_ids (name) values ($1) returning id", "Ada").await
+            } else {
+                db.one("insert into new_ids (name) values (?) returning id", "Ada").await
+            };
+            match first {
+                Ok(id) => assert_eq(id, 1),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            let second: Result<i64, Error> = if pg() {
+                db.one("insert into new_ids (name) values ($1) returning id", "Alan").await
+            } else {
+                db.one("insert into new_ids (name) values (?) returning id", "Alan").await
+            };
+            match second {
+                Ok(id) => assert_eq(id, 2),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}

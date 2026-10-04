@@ -1,0 +1,27 @@
+[package]
+name = "varyk-sql"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+authors = ["Vlad Mickevic"]
+description = "The SQL package for Varyk, a language for backend services that compiles to Rust: SQLite, Postgres, and MySQL through sqlx"
+repository = "https://github.com/Varyk-Lang/varyk-sql"
+homepage = "https://varyk.com"
+keywords = ["varyk", "sql", "database", "sqlx", "postgres"]
+categories = ["database"]
+
+[lib]
+path = "src/lib.vr"
+
+[features]
+default = ["sqlite"]
+sqlite = ["sqlx/sqlite"]
+postgres = ["sqlx/postgres"]
+mysql = ["sqlx/mysql"]
+
+[dependencies]
+varyk-std = "0.6"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "any", "migrate", "tls-rustls"] }
+serde = "1"
+futures-core = "0.3"
