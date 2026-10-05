@@ -1,10 +1,12 @@
 # varyk-sql
 
-The SQL package for [Varyk](https://varyk.com), a language for backend
-services that compiles to Rust: SQLite, Postgres, and MySQL through
-sqlx.
+The official SQL package for [Varyk](https://varyk.com), a language
+for backend services that compiles to Rust: SQLite, Postgres, and MySQL
+through sqlx.
 
-Varyk is experimental and pre-1.0: anything here may change.
+varyk-sql 0.1.0 is on [crates.io](https://crates.io/crates/varyk-sql)
+and works with varyk 0.6 (see [Versions](#versions)). Varyk is
+experimental and pre-1.0: anything here may change.
 
 The package covers what an ordinary service does with a database and
 nothing more: connect, over TLS when the URL asks for it, run
@@ -14,15 +16,16 @@ in-memory SQLite database.
 ## Install
 
 ```sh
-cargo install varyk
+cargo install varyk --version '^0.6' --locked
 varyk init users
 cd users
 varyk add sql
 ```
 
-`varyk add sql` runs `cargo add varyk-sql --rename sql`, so code names
-the package `sql::`. The default driver is SQLite, compiled from its C
-source on the first build: that needs a C compiler (Xcode's
+`varyk add sql` runs `cargo add varyk-sql --rename sql`, so the
+manifest gets `sql = { version = "0.1.0", package = "varyk-sql" }` and
+code names the package `sql::`. The default driver is SQLite, compiled
+from its C source on the first build: that needs a C compiler (Xcode's
 command-line tools on macOS, `build-essential` on Debian and Ubuntu)
 and takes a few minutes, once. A server driver is a feature:
 
@@ -171,7 +174,7 @@ stage:
 
 ```dockerfile
 FROM rust:1-bookworm AS build
-RUN cargo install varyk
+RUN cargo install varyk --version '^0.6' --locked
 WORKDIR /src
 COPY . .
 RUN varyk build --release
@@ -246,7 +249,7 @@ statement that reads what an earlier one left on its connection does
 not work on a pool. Read a new row's id in the statement that makes it:
 
 ```varyk
-// Postgres ($1) and SQLite (?)
+// Postgres; SQLite takes `$1` as well as `?`
 let id: i64 = db.one("insert into users (name) values ($1) returning id", name).await?;
 ```
 
@@ -392,12 +395,12 @@ with the `?` as written and the value `"Ada"` nowhere in the log.
 
 ## Health check
 
+A readiness check takes a connection from the pool and asks the
+database for an answer:
+
 ```varyk
 let _ok = db.run("select 1").await?;
 ```
-
-is the readiness check: it takes a connection from the pool and asks
-the database for an answer.
 
 ## Testing
 
@@ -420,12 +423,10 @@ async fn adds_a_user() {
 ```
 
 A test returns nothing, so the work goes in a function that returns a
-`Result`, and the test opens it with `match` and `assert`. Each
+`Result`, and the test opens it with `match` and `assert_eq`. Each
 `sqlite::memory:` pool is a database of its own, alive while the pool
-is, so every test starts empty. Its one connection keeps the test's
-queries in order; a query on the pool while a transaction is open waits
-for that connection and fails after 30 s, so finish the transaction
-first.
+is, so every test starts empty; its single connection has the limits
+described under [Configuration](#configuration).
 
 Run `varyk test` from the package root: `migrate("migrations")` and
 `.env` are read relative to the working directory.
@@ -442,9 +443,14 @@ followed by a varyk-sql release.
 
 ## Security
 
-Report a vulnerability as the security policy shared by every
-Varyk-Lang repository says:
-https://github.com/Varyk-Lang/varyk-sql/security/policy
+Report a vulnerability as described in the
+[security policy](https://github.com/Varyk-Lang/varyk-sql/security/policy)
+shared by every Varyk-Lang repository.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md); rules for AI coding agents are
+in [AGENTS.md](AGENTS.md).
 
 ## License
 
