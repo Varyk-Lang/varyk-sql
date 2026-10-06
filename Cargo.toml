@@ -21,7 +21,7 @@ postgres = ["sqlx/postgres"]
 mysql = ["sqlx/mysql"]
 
 [dependencies]
-varyk-std = "0.6"
+varyk-std = "0.7"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "any", "migrate", "tls-rustls"] }
 serde = "1"
 futures-core = "0.3"

@@ -11,8 +11,8 @@ is welcome.
 
 You need a stable Rust toolchain through [rustup](https://rustup.rs),
 a C compiler for SQLite (Xcode's command-line tools, `build-essential`),
-and `varyk` (`cargo install varyk --version '^0.6' --locked`, the
-latest 0.6 release, as CI uses). The package is a Varyk package
+and `varyk` (`cargo install varyk --version '^0.7' --locked`, the
+latest 0.7 release, as CI uses). The package is a Varyk package
 (`src/lib.vr`), so it is built only by `varyk`; plain `cargo build`
 does not work here. Before opening a pull request, run the same checks
 CI runs:

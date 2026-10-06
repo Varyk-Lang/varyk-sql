@@ -47,7 +47,7 @@ jobs:
           components: rustfmt, clippy
 
       - name: Install varyk
-        run: cargo install varyk --version '^0.6' --locked
+        run: cargo install varyk --version '^0.7' --locked
 
       - name: Check
         run: varyk check
@@ -108,7 +108,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.85
 
       - name: Install varyk
-        run: cargo install varyk --version '^0.6' --locked
+        run: cargo install varyk --version '^0.7' --locked
 
       - name: Check
         run: varyk check

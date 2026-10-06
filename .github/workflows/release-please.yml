@@ -57,7 +57,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Install varyk
-        run: cargo install varyk --version '^0.6' --locked
+        run: cargo install varyk --version '^0.7' --locked
 
       - name: Publish varyk-sql
         # Assembles the plain Rust crate from the package, then runs cargo publish.
