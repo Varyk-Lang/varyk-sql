@@ -4,9 +4,10 @@ The official SQL package for [Varyk](https://varyk.com), a language
 for backend services that compiles to Rust: SQLite, Postgres, and MySQL
 through sqlx.
 
-varyk-sql 0.1.0 is on [crates.io](https://crates.io/crates/varyk-sql)
-and works with varyk 0.6 (see [Versions](#versions)). Varyk is
-experimental and pre-1.0: anything here may change.
+varyk-sql is on [crates.io](https://crates.io/crates/varyk-sql): 0.2
+works with varyk 0.7, and 0.1 with varyk 0.6 (see
+[Versions](#versions)). Varyk is experimental and pre-1.0: anything
+here may change.
 
 The package covers what an ordinary service does with a database and
 nothing more: connect, over TLS when the URL asks for it, run
@@ -16,14 +17,14 @@ in-memory SQLite database.
 ## Install
 
 ```sh
-cargo install varyk --version '^0.6' --locked
+cargo install varyk --version '^0.7' --locked
 varyk init users
 cd users
 varyk add sql
 ```
 
 `varyk add sql` runs `cargo add varyk-sql --rename sql`, so the
-manifest gets `sql = { version = "0.1.0", package = "varyk-sql" }` and
+manifest gets `sql = { version = "0.2.0", package = "varyk-sql" }` and
 code names the package `sql::`. The default driver is SQLite, compiled
 from its C source on the first build: that needs a C compiler (Xcode's
 command-line tools on macOS, `build-essential` on Debian and Ubuntu)
@@ -174,7 +175,7 @@ stage:
 
 ```dockerfile
 FROM rust:1-bookworm AS build
-RUN cargo install varyk --version '^0.6' --locked
+RUN cargo install varyk --version '^0.7' --locked
 WORKDIR /src
 COPY . .
 RUN varyk build --release
@@ -439,6 +440,7 @@ followed by a varyk-sql release.
 
 | varyk-sql | varyk |
 |---|---|
+| 0.2 | 0.7 |
 | 0.1 | 0.6 |
 
 ## Security
