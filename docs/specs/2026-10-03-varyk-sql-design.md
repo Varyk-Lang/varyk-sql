@@ -58,6 +58,8 @@ inside transactions, log, and test against an in-memory SQLite.
   program compiled with two drivers chooses between them by configuration
   alone. The cost is that `Any` decodes a fixed set of column types
   (section 2.6); other types are cast in SQL.
+  0.3 replaces this with concrete pools, one per driver
+  (`2026-10-07-varyk-sql-0.3-design.md` §1.1).
 - **Scalars only as values**, by M5b3 §2.2; one query form, with the
   database's own placeholders passed through.
 - **Migrations at run time**, from a folder, with sqlx's own file format
@@ -504,6 +506,8 @@ numeric, JSON, and array columns without a cast; a query spanning two
 databases' placeholder styles; sqlx's compile-time checked `query!`;
 Postgres `listen`/`notify` and `copy`; `Shared<Pool>` for handlers (5b4);
 MongoDB and Redis (their own packages, after 5b4).
+Time, uuid, and bytes columns need no cast from 0.3, which leaves
+`date` and the rest here (`2026-10-07-varyk-sql-0.3-design.md` §3, §8).
 
 ## 9. Open questions
 
@@ -519,3 +523,5 @@ MongoDB and Redis (their own packages, after 5b4).
 - When Varyk has date and uuid types, should they be read from native
   columns through `Any`, which cannot decode them, or should the package
   drop `Any` for an enum of concrete pools?
+  Answered in 0.3: an enum of concrete pools
+  (`2026-10-07-varyk-sql-0.3-design.md` §1.1).

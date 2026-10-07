@@ -47,7 +47,7 @@ jobs:
           components: rustfmt, clippy
 
       - name: Install varyk
-        run: cargo install varyk --version '^0.7' --locked
+        run: cargo install varyk --version '^0.8' --locked
 
       - name: Check
         run: varyk check
@@ -81,21 +81,31 @@ jobs:
           varyk test
           git checkout -- Cargo.toml
 
+      # The demo prints one line, `1 Ada` and the time the row was added,
+      # which changes each run: RFC 3339 in UTC, with a fraction unless it
+      # is zero.
       - name: Demo
         working-directory: demo/users
         run: |
           out="$(varyk run)"
           echo "$out"
-          test "$out" = "1 Ada"
+          test "$(printf '%s\n' "$out" | wc -l)" -eq 1
+          printf '%s\n' "$out" | grep -Eqx '1 Ada [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,6})?Z'
 
       - name: Format check
         run: rustfmt --edition 2024 --check src/db.rs
 
+      # Each driver's code is behind its feature, so clippy runs on the
+      # default build, on every driver, and on each server driver alone,
+      # as the README's single-driver builds use them.
       - name: Clippy
         run: |
           crate="$(varyk publish --assemble-only)"
           cd "$crate"
           cargo clippy --all-targets -- -D warnings
+          cargo clippy --all-targets --all-features -- -D warnings
+          cargo clippy --all-targets --no-default-features --features postgres -- -D warnings
+          cargo clippy --all-targets --no-default-features --features mysql -- -D warnings
 
   msrv:
     runs-on: ubuntu-latest
@@ -108,7 +118,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.85
 
       - name: Install varyk
-        run: cargo install varyk --version '^0.7' --locked
+        run: cargo install varyk --version '^0.8' --locked
 
       - name: Check
         run: varyk check

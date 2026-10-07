@@ -26,8 +26,9 @@ code building on Rust 1.85 (no let-chains).
   `expect`, or indexing that can fail. Every failure is a
   `varyk_std::Error`.
 - **No secret in an error.** `src/db.rs` never writes the database URL, a
-  password, Postgres's "detail" field, or a bound value into a message;
-  only the database's own message text passes through.
+  password, Postgres's "detail" field, a bound value, or a value read
+  from a row into a message; only the database's own message text
+  passes through.
 - **Queries stay literal.** The query text is a literal; never add a
   way to build one from input.
 - **Commits.** Conventional prefixes (`feat:`, `fix:`, `docs:`, ...),

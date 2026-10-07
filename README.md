@@ -4,8 +4,8 @@ The official SQL package for [Varyk](https://varyk.com), a language
 for backend services that compiles to Rust: SQLite, Postgres, and MySQL
 through sqlx.
 
-varyk-sql is on [crates.io](https://crates.io/crates/varyk-sql): 0.2
-works with varyk 0.7, and 0.1 with varyk 0.6 (see
+varyk-sql is on [crates.io](https://crates.io/crates/varyk-sql): 0.3
+works with varyk 0.8, 0.2 with varyk 0.7, and 0.1 with varyk 0.6 (see
 [Versions](#versions)). Varyk is experimental and pre-1.0: anything
 here may change.
 
@@ -17,14 +17,14 @@ in-memory SQLite database.
 ## Install
 
 ```sh
-cargo install varyk --version '^0.7' --locked
+cargo install varyk --version '^0.8' --locked
 varyk init users
 cd users
 varyk add sql
 ```
 
 `varyk add sql` runs `cargo add varyk-sql --rename sql`, so the
-manifest gets `sql = { version = "0.2.0", package = "varyk-sql" }` and
+manifest gets `sql = { version = "0.3.0", package = "varyk-sql" }` and
 code names the package `sql::`. The default driver is SQLite, compiled
 from its C source on the first build: that needs a C compiler (Xcode's
 command-line tools on macOS, `build-essential` on Debian and Ubuntu)
@@ -48,21 +48,22 @@ struct Config {
 struct User {
     id: i64,
     name: string,
+    created_at: Time,
 }
 
 async fn load() -> Result<Vec<User>, Error> {
     let config: Config = env::parse()?;
     let db = sql::connect(config.database_url).await?;
     db.migrate("migrations").await?;
-    db.run("insert into users (name) values (?)", "Ada").await?;
-    db.all("select id, name from users").await
+    db.run("insert into users (name, created_at) values (?, ?)", "Ada", Time::now()).await?;
+    db.all("select id, name, created_at from users").await
 }
 
 async fn main() {
     match load().await {
         Ok(users) => {
             for user in users {
-                println!("{} {}", user.id, user.name);
+                println!("{} {} {}", user.id, user.name, user.created_at);
             }
         }
         Err(e) => log::error("{}", e.message()),
@@ -75,14 +76,19 @@ async fn main() {
 ```sql
 create table users (
     id integer primary key,
-    name text not null
+    name text not null,
+    created_at text not null
 );
 ```
 
 `integer primary key` numbers new rows by itself only on SQLite; on
 Postgres write `id integer primary key generated always as identity`,
 and on MySQL `id integer primary key auto_increment`. To read the id a
-new row got, see [Generated ids](#generated-ids).
+new row got, see [Generated ids](#generated-ids). SQLite has no time
+type, so `created_at` is `text` there and holds the time as text (see
+[Column types](#column-types)); on Postgres write `created_at
+timestamptz not null`, and on MySQL `created_at datetime(6) not null`,
+whose `(6)` keeps the microseconds a `Time` has.
 
 `.env`:
 
@@ -90,11 +96,12 @@ new row got, see [Generated ids](#generated-ids).
 DATABASE_URL=sqlite::memory:
 ```
 
-`varyk run` prints `1 Ada`. `main` returns nothing in Varyk, so the work
-is in `load`, and `main` matches on its result; `all` takes its row type
-from `load`'s return type. The same program is in
-[`demo/users`](demo/users). The query's `?` is SQLite's and MySQL's
-placeholder; Postgres's is `$1` (see [Queries](#queries)).
+`varyk run` prints the user and the time the row was added, as `{}`
+writes a `Time`: `1 Ada 2026-10-07T12:00:00.123456Z`. `main` returns
+nothing in Varyk, so the work is in `load`, and `main` matches on its
+result; `all` takes its row type from `load`'s return type. The same
+program is in [`demo/users`](demo/users). The query's `?` is SQLite's
+and MySQL's placeholder; Postgres's is `$1` (see [Queries](#queries)).
 
 ## Configuration
 
@@ -175,7 +182,7 @@ stage:
 
 ```dockerfile
 FROM rust:1-bookworm AS build
-RUN cargo install varyk --version '^0.7' --locked
+RUN cargo install varyk --version '^0.8' --locked
 WORKDIR /src
 COPY . .
 RUN varyk build --release
@@ -213,7 +220,9 @@ On a pool and on a transaction:
 The query is literal text: a query built from input does not compile,
 which is the package's guard against SQL injection. The values go after
 it, one per placeholder: `bool`, `string`, floats, integers up to
-`i64`, and an `Option` of each, where `None` is `NULL`.
+`i64`, `Time`, `Uuid`, `Bytes`, and an `Option` of each, where `None` is
+`NULL`. [Column types](#column-types) says which column each one goes
+into.
 
 ```varyk
 let user: Option<User> = db.first("select id, name from users where id = ?", id).await?;
@@ -227,17 +236,13 @@ queries and picks one with an `if`.
   number of placeholders before the query runs, and a mismatch is an
   `Error` naming both. On Postgres the server rejects too few values
   and ignores an extra one.
-- On Postgres a value goes as it is into an integer, float, or text
-  column. A parameter for a column of another type is written
-  `$1::text::<type>`: `$1::text::boolean` for a boolean when the value
-  may be `None` (a `None` is sent as an integer `NULL`, which Postgres
-  will not cast to `boolean`, not even with `$1::boolean`), and
-  `$1::text::uuid` or `$1::text::timestamptz` with the value as a
-  string. A value that may be `None` compared with a column that is not
-  an integer is written `$1::text` (or `$1::text::<type>`), as in the
-  optional filter `where ($1::text is null or name = $1::text)`; a
-  plain `nick = $1` with `None` fails with "operator does not exist:
-  character varying = bigint".
+- On Postgres a `None` is a `NULL` with no type, which takes its type
+  from where the parameter is first used: in `set done = $1` and in
+  `where done = $1` it takes the type of `done`, with no cast. Where
+  nothing there gives it a type, as in `$1 is null`, Postgres answers
+  "could not determine data type of parameter $1": cast the parameter
+  at its first use, as in the optional filter `where ($1::text is null
+  or name = $1)`.
 
 `one` or `first`: a handler that answers "not found" uses `first` and
 matches on `None`; `one` is for a row that must exist. Neither adds a
@@ -254,7 +259,7 @@ not work on a pool. Read a new row's id in the statement that makes it:
 
 ```varyk
 // Postgres; SQLite takes `$1` as well as `?`
-let id: i64 = db.one("insert into users (name) values ($1) returning id", name).await?;
+let id: i64 = db.one("insert into users (name, created_at) values ($1, $2) returning id", name, Time::now()).await?;
 ```
 
 MySQL has no `returning`, and `select last_insert_id()` on a pool may
@@ -263,7 +268,7 @@ request's id. Run both in one transaction, which holds one connection:
 
 ```varyk
 let mut tx = db.begin().await?;
-let _added = tx.run("insert into users (name) values (?)", name).await?;
+let _added = tx.run("insert into users (name, created_at) values (?, ?)", name, Time::now()).await?;
 let id: i64 = tx.one("select last_insert_id()").await?;
 tx.commit().await?;
 ```
@@ -279,13 +284,13 @@ for the next request that gets it.
 `T` comes from where the result goes: `let user: User =
 db.one(..).await?`. A struct is read by column name: each field takes
 the column of its name, or of its `#[rename("..")]`; columns the struct
-has no field for are ignored; a field with no column is an `Error`
-naming it, unless it is an `Option` (then `None`) or has `#[default]`.
-A `NULL` goes into an `Option` field as `None` and into any other field
-as an `Error` naming the column.
+has no field for are ignored, whatever their type; a field with no
+column is an `Error` naming it, unless it is an `Option` (then `None`)
+or has `#[default]`. A `NULL` goes into an `Option` field as `None` and
+into any other field as an `Error` naming the column.
 
-When `T` is a number, `bool`, or `string`, or an `Option` of one, the
-row has exactly one column:
+When `T` is a number, `bool`, `string`, `Time`, `Uuid`, or `Bytes`, or
+an `Option` of one, the row has exactly one column:
 
 ```varyk
 let n: i64 = db.one("select count(*) from users").await?;
@@ -297,36 +302,60 @@ a row.
 
 ## Column types
 
-sqlx's `Any` driver, which serves all three databases through one pool,
-reads booleans, integers, floats, and text. One rule applies on each:
-an integer column goes into an integer field when the value is in the
-field's range, and into a float field; a float column goes into a float
-field, and into an integer field only when it is whole and in range; a
-`bool` field takes a boolean column or an integer `0` or `1`; a
-`string` field takes text, and bytes that are UTF-8 text (MySQL
-reports a `text` column as bytes).
+A `Time`, a `Uuid`, and a `Bytes` each go into a column of their own on
+each database, and back, with no cast:
+
+| Database | `Time` | `Uuid` | `Bytes` |
+|---|---|---|---|
+| Postgres | `timestamptz` | `uuid` | `bytea` |
+| MySQL | `datetime(6)` | `char(36)` | `blob` |
+| SQLite | `text` | `text` | `blob` |
+
+- A `Uuid` goes into MySQL and SQLite as its written form, 36
+  characters in lower case, so it reads the same in a SQL shell as in
+  JSON. Keep a MySQL `char(36)` at a text collation: MySQL names a text
+  column with a binary collation (`ascii_bin`, `utf8mb4_bin`) as bytes,
+  which a `Uuid` field refuses and a `Bytes` field reads as they are,
+  not as base64. A `binary(16)` column holds a `Uuid` as its 16 bytes.
+- A `Time` goes into SQLite as text of a fixed width,
+  `2026-10-07T12:00:00.000000Z`, always with six fraction digits, so
+  `order by` and `<` in SQL put times in the order Varyk does. A SQLite
+  `default current_timestamp` writes `2026-10-07 12:00:00`, with a space
+  and no zone, which a `Time` does not read: write the time from Varyk,
+  as the demo does, or store RFC 3339 text.
+- A `Time` goes into MySQL as a date and time in UTC. A `datetime(6)`
+  keeps its microseconds, where a plain `datetime` rounds to the second,
+  and a `timestamp(6)` holds the same instant, since sqlx sets each
+  session's time zone to UTC. A URL that sets another zone
+  (`?timezone=%2B02:00`) makes MySQL give a `timestamp` column, and
+  `now()`, as that zone's wall clock, which a `Time` takes as UTC, two
+  hours off here, and stores a `Time` written into a `timestamp` two
+  hours off the other way. Leave `timezone` out of the URL.
+- A Postgres `timestamp`, with no zone, reads into a `Time` as UTC.
+
+A field reads a column by one rule on every database. An integer
+column goes into an integer field when the value is in the field's
+range, and into a float field; a float column goes into a float field,
+and into an integer field only when it is whole and in range. A `bool`
+field takes a boolean column or an integer `0` or `1`. A `string` field
+takes text, bytes that are UTF-8 text (MySQL names a text column with a
+binary collation as bytes), and a time or uuid column as its written
+form (on SQLite, the text stored). A `Time` field takes a time column,
+or text in RFC 3339 form; a `Uuid` field a `uuid` column, text of 36
+characters, or 16 bytes (a `binary(16)`, say); a `Bytes` field a binary
+column, or text as base64. A value the field does not take is an
+`Error` naming the column, never the value.
 
 | Database | Read as they are | Cast in the query |
 |---|---|---|
-| Postgres | `boolean`, `smallint`, `integer`, `bigint`, `real`, `double precision`, `text`, `varchar` | anything else to `text` (or a number): `id::text` for `uuid`, `timestamptz`, `numeric`, `json`, `char(n)` |
-| MySQL | `smallint`, `int`, `bigint` (signed), `float`, `double`, `char(n)`, `varchar(n)`, `text` | `datetime`, `decimal`, `json` with `cast(x as char)`; `boolean`, `tinyint`, `mediumint`, `smallint unsigned`, `int unsigned` with `cast(x as signed)`; `bigint unsigned` with `cast(x as char)` into a `string`; `sum` over integers gives `decimal`, so `cast(sum(x) as signed)` reads an integer sum, and `cast(avg(x) as double)` an average |
-| SQLite | `integer`, `real`, `text`, `varchar` | a column declared `boolean` with `cast(x as integer)`; `datetime`, `date`, `timestamp`, `time` with `cast(x as text)` |
+| Postgres | `boolean`, `smallint`, `integer`, `bigint`, `real`, `double precision`, `text`, `varchar`, `bytea`, `timestamptz`, `timestamp`, `uuid` | `numeric`, `json`, `date`, `time`, arrays, and `char(n)` to `text` or a number: `amount::text` |
+| MySQL | `boolean`, `tinyint`, `smallint`, `mediumint`, `int`, and `bigint`, signed or unsigned, `float`, `double`, `char(n)`, `varchar(n)`, `text` of any size, `enum`, `binary(n)`, `varbinary(n)`, `blob` of any size, `datetime`, `timestamp` | `decimal`, `json`, `date`, `time` with `cast(x as char)`; `sum` over integers gives `decimal`, so `cast(sum(x) as signed)` reads an integer sum, and `cast(avg(x) as double)` an average |
+| SQLite | every value, by what it holds (an integer, a float, text, or bytes), whatever type its column declares | nothing |
 
-Every selected column must be one the driver reads, whether or not `T`
-has a field for it: `select *` on a table with a `timestamptz` column
-fails even when the struct leaves it out. Name the columns. Varyk has
-no date, uuid, or bytes type yet; when it does, this list grows.
-
-MySQL's unsigned integers read wrong without an `Error`: the driver
-reads `smallint unsigned`, `int unsigned`, and `bigint unsigned` as
-signed, so a value at or above 2^15, 2^31, or 2^63 wraps to a negative
-number (40000 in a `smallint unsigned` reads as -25536, 3000000000 in
-an `int unsigned` as -1294967296). Read a `smallint unsigned` or an
-`int unsigned` with `cast(x as signed)` into an `i64`, and a `bigint
-unsigned` that may reach 2^63 with `cast(x as char)` into a `string`.
-The cast goes around the selected expression, `cast(max(x) as
-signed)`, since `max(x)`, `min(x)`, and a subquery keep the column's
-unsigned type.
+A column of a type the table does not list is an `Error` naming the
+column when a field reads it. Postgres takes a `string` as `text`, so
+one written into a `numeric`, `json`, or `date` column is cast at its
+placeholder: `$1::date`.
 
 ## Transactions
 
@@ -376,10 +405,8 @@ call panics.
   give clients a message of your own.
 - A connection failure says which step failed and never contains the
   URL.
-- A row that cannot be read names the field or column, with one
-  exception: on MySQL a column of a type the driver cannot read is
-  "the query uses a type varyk-sql cannot read or write; cast it in the
-  query", naming no column.
+- A row that cannot be read names the field or column, never the value
+  in it.
 
 ## Logging
 
@@ -389,13 +416,14 @@ took, never the values. `LOG=debug` turns these lines on; the demo's
 insert gives
 
 ```text
-2026-10-03T23:59:25.268Z DEBUG summary=insert into users (name) … db.statement=
+2026-10-07T08:02:34.865Z DEBUG summary=insert into users (name, … db.statement=
 
-insert into users (name) values (?)
- rows_affected=1 rows_returned=0 elapsed=18.583µs elapsed_secs=1.8583e-5
+insert into users (name, created_at) values (?, ?)
+ rows_affected=1 rows_returned=0 elapsed=14.334µs elapsed_secs=1.4334e-5
 ```
 
-with the `?` as written and the value `"Ada"` nowhere in the log.
+with the `?`s as written and the values, `"Ada"` and the time, nowhere
+in the log.
 
 ## Health check
 
@@ -412,7 +440,7 @@ let _ok = db.run("select 1").await?;
 async fn count_users() -> Result<i64, Error> {
     let db = sql::connect_with("sqlite::memory:", 1).await?;
     db.migrate("migrations").await?;
-    db.run("insert into users (name) values (?)", "Ada").await?;
+    db.run("insert into users (name, created_at) values (?, ?)", "Ada", Time::now()).await?;
     db.one("select count(*) from users").await
 }
 
@@ -443,6 +471,7 @@ followed by a varyk-sql release.
 
 | varyk-sql | varyk |
 |---|---|
+| 0.3 | 0.8 |
 | 0.2 | 0.7 |
 | 0.1 | 0.6 |
 
