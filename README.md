@@ -189,12 +189,15 @@ CMD ["./users"]
 
 `COPY . .` sends the whole folder to the build, so a `.dockerignore`
 beside the `Dockerfile` keeps the host's build output and secrets out
-of it:
+of it; `varyk init` writes this one since varyk 0.7.1:
 
 ```text
 target
 .env
 ```
+
+Docker reuses the cached `cargo install` layer on a rebuild, so to pick
+up a newer varyk, build once with `docker build --no-cache .`.
 
 ## Queries
 
