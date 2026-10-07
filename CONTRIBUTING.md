@@ -11,8 +11,8 @@ is welcome.
 
 You need a stable Rust toolchain through [rustup](https://rustup.rs),
 a C compiler for SQLite (Xcode's command-line tools, `build-essential`),
-and `varyk` (`cargo install varyk --version '^0.7' --locked`, the
-latest 0.7 release, as CI uses). The package is a Varyk package
+and `varyk` (`cargo install varyk --version '^0.8' --locked`, the
+latest 0.8 release, as CI uses). The package is a Varyk package
 (`src/lib.vr`), so it is built only by `varyk`; plain `cargo build`
 does not work here. Before opening a pull request, run the same checks
 CI runs:
@@ -55,6 +55,14 @@ check; a red run means a new varyk needs a varyk-sql release.
 - `src/tests.vr` holds the tests, as a module: a Varyk package may not
   have a `tests/`, `examples/`, or `benches/` directory. Each test reads
   `DATABASE_URL` and uses `sqlite::memory:` when it is not set.
+- `migrations/` holds the tests' schema in three folders,
+  `migrations/sqlite`, `migrations/postgres`, and `migrations/mysql`,
+  since the column types of the `kinds` table differ by database; the
+  tests pick the folder from `DATABASE_URL`. Each folder holds the whole
+  history: `0001_users.sql` and `0002_bio.sql` are the same bytes in all
+  three, as they were in `migrations/` before, so a database that ran
+  them keeps its checksums. A change to a shared migration goes to all
+  three copies alike.
 - `docs/specs/` holds the design; read it before changing what the
   package offers.
 

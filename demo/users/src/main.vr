@@ -1,5 +1,6 @@
 // The users service of the README: reads `DATABASE_URL`, applies the
-// migrations, writes one user, and prints every user.
+// migrations, writes one user with the time it was added, and prints
+// every user.
 
 struct Config {
     database_url: string,
@@ -8,21 +9,22 @@ struct Config {
 struct User {
     id: i64,
     name: string,
+    created_at: Time,
 }
 
 async fn load() -> Result<Vec<User>, Error> {
     let config: Config = env::parse()?;
     let db = sql::connect(config.database_url).await?;
     db.migrate("migrations").await?;
-    db.run("insert into users (name) values (?)", "Ada").await?;
-    db.all("select id, name from users").await
+    db.run("insert into users (name, created_at) values (?, ?)", "Ada", Time::now()).await?;
+    db.all("select id, name, created_at from users").await
 }
 
 async fn main() {
     match load().await {
         Ok(users) => {
             for user in users {
-                println!("{} {}", user.id, user.name);
+                println!("{} {} {}", user.id, user.name, user.created_at);
             }
         }
         Err(e) => log::error("{}", e.message()),

@@ -125,14 +125,31 @@ fn pg() -> bool {
     url().starts_with("postgres")
 }
 
+// The migration folder for the database `url()` names: the column types
+// of `kinds` differ by database, so each has its own copy of the history.
+fn migrations() -> string {
+    if pg() {
+        "migrations/postgres"
+    } else if url().starts_with("mysql") {
+        "migrations/mysql"
+    } else {
+        "migrations/sqlite"
+    }
+}
+
 // A pool with the schema applied and the rows of `test` deleted.
 async fn ready(test: string) -> Result<crate::Pool, Error> {
     let db = crate::connect_with(url(), 1).await?;
-    let _migrated = db.migrate("migrations").await?;
+    let _migrated = db.migrate(migrations()).await?;
     let _deleted: u64 = if pg() {
         db.run("delete from users where test = $1", test).await?
     } else {
         db.run("delete from users where test = ?", test).await?
+    };
+    let _kinds: u64 = if pg() {
+        db.run("delete from kinds where test = $1", test).await?
+    } else {
+        db.run("delete from kinds where test = ?", test).await?
     };
     Ok(db)
 }
@@ -490,8 +507,9 @@ async fn set_score(db: crate::Pool, score: Option<f64>) -> Result<u64, Error> {
 }
 
 // A statement first run with `None` and then with a value stores the
-// value: on Postgres a `None` binds as an integer, and a statement kept
-// prepared with that type would take the next value's bytes as one.
+// value: on Postgres a `None` binds as an untyped `NULL`, whose type the
+// server infers from the query, and the statement is not kept prepared,
+// so each run is parsed again with its own values' types.
 #[test]
 async fn a_statement_run_with_none_then_a_value_stores_the_value() {
     let opened: Result<crate::Pool, Error> = ready("none_then_text").await;
@@ -544,16 +562,16 @@ async fn a_statement_run_with_none_then_a_value_stores_the_value() {
     }
 }
 
-// Sets `done` of row 1 of `nullable_boolean` through the Postgres cast
-// the README gives for a boolean that may be `None`.
+// Sets `done` of row 1 of `nullable_boolean`, with no cast.
 async fn set_done(db: crate::Pool, done: Option<bool>) -> Result<u64, Error> {
-    db.run("update users set done = $1::text::boolean where test = 'nullable_boolean' and id = 1", done).await
+    db.run("update users set done = $1 where test = 'nullable_boolean' and id = 1", done).await
 }
 
-// On Postgres a nullable boolean column takes `None` and `true` through
-// `$1::text::boolean`.
+// On Postgres a nullable boolean column takes `None` and `true` with no
+// cast: a `None` is an untyped `NULL`, which the server types from the
+// column it is set into.
 #[test]
-async fn a_postgres_boolean_takes_none_and_true_through_a_text_cast() {
+async fn a_postgres_boolean_takes_none_and_true_with_no_cast() {
     if !pg() {
         return;
     }
@@ -588,15 +606,17 @@ async fn a_postgres_boolean_takes_none_and_true_through_a_text_cast() {
 }
 
 // The names of the rows of `optional_filter` whose name is `name`, or of
-// all of them when it is `None`, through the Postgres text cast.
+// all of them when it is `None`, with one cast at the parameter's first
+// use.
 async fn names_named(db: crate::Pool, name: Option<string>) -> Result<Vec<string>, Error> {
-    db.all("select name from users where test = 'optional_filter' and ($1::text is null or name = $1::text) order by id", name).await
+    db.all("select name from users where test = 'optional_filter' and ($1::text is null or name = $1) order by id", name).await
 }
 
-// On Postgres a `None` compared with a text column is cast to `text`; a
-// plain `$1` is an integer and has no `=` with `varchar`.
+// On Postgres a parameter first used where nothing gives it a type, as in
+// `$1 is null`, takes its type from a cast there; the later `name = $1`
+// needs none.
 #[test]
-async fn a_postgres_optional_filter_takes_none_and_a_value_through_a_text_cast() {
+async fn a_postgres_optional_filter_takes_none_and_a_value_with_one_cast() {
     if !pg() {
         return;
     }
@@ -616,6 +636,77 @@ async fn a_postgres_optional_filter_takes_none_and_a_value_through_a_text_cast()
                     assert_eq(names.len(), 1);
                     assert_eq(names[0], "Alan");
                 }
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+// On Postgres a `None` at a parameter's first use where nothing gives it
+// a type is the database's error, which the README's one rule answers
+// with a cast there.
+#[test]
+async fn a_postgres_none_with_no_type_is_a_database_error() {
+    if !pg() {
+        return;
+    }
+    let opened: Result<crate::Pool, Error> = crate::connect_with(url(), 1).await;
+    match opened {
+        Ok(db) => {
+            let missing: Option<string> = None;
+            let read: Result<bool, Error> = db.one("select $1 is null", missing).await;
+            match read {
+                Ok(_) => assert(false),
+                Err(e) => assert(e.message().contains("could not determine data type of parameter $1")),
+            }
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+// On Postgres a function that returns `void` reads as `None`, as in 0.1.
+#[test]
+async fn a_postgres_void_reads_as_none() {
+    if !pg() {
+        return;
+    }
+    let opened: Result<crate::Pool, Error> = crate::connect_with(url(), 1).await;
+    match opened {
+        Ok(db) => {
+            let slept: Result<Option<i64>, Error> = db.one("select pg_sleep(0)").await;
+            match slept {
+                Ok(v) => assert(!v.is_some()),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+struct Named {
+    name: string,
+}
+
+// A column no field reads is not looked at, whatever its type: here one
+// of a type the reader does not list (`numeric` on Postgres, `decimal` on
+// MySQL; SQLite lists every storage class, so a `real` there).
+#[test]
+async fn an_unread_column_of_an_unlisted_type_is_not_looked_at() {
+    let opened: Result<crate::Pool, Error> = ready("unread_column").await;
+    match opened {
+        Ok(db) => {
+            let added: Result<u64, Error> = db.run("insert into users (test, id, name) values ('unread_column', 1, 'Ada')").await;
+            assert(added.is_ok());
+            let read: Result<Named, Error> = if pg() {
+                db.one("select name, 1.5::numeric as amount from users where test = 'unread_column'").await
+            } else if url().starts_with("mysql") {
+                db.one("select name, cast(1.5 as decimal(4,2)) as amount from users where test = 'unread_column'").await
+            } else {
+                db.one("select name, 1.5 as amount from users where test = 'unread_column'").await
+            };
+            match read {
+                Ok(n) => assert_eq(n.name, "Ada"),
                 Err(e) => assert_eq(e.message(), "no error"),
             }
         }
@@ -1133,7 +1224,7 @@ async fn migrate_applies_the_schema_and_a_second_run_changes_nothing() {
     let opened: Result<crate::Pool, Error> = crate::connect_with(url(), 1).await;
     match opened {
         Ok(db) => {
-            let first: Result<bool, Error> = db.migrate("migrations").await;
+            let first: Result<bool, Error> = db.migrate(migrations()).await;
             match first {
                 Ok(done) => assert(done),
                 Err(e) => assert_eq(e.message(), "no error"),
@@ -1143,8 +1234,13 @@ async fn migrate_applies_the_schema_and_a_second_run_changes_nothing() {
                 Ok(n) => assert_eq(n, 0),
                 Err(e) => assert_eq(e.message(), "no error"),
             }
+            let kinds: Result<i64, Error> = db.one("select count(*) from kinds where test = 'migrate_twice'").await;
+            match kinds {
+                Ok(n) => assert_eq(n, 0),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
             let before: Result<i64, Error> = db.one("select count(*) from _sqlx_migrations").await;
-            let second: Result<bool, Error> = db.migrate("migrations").await;
+            let second: Result<bool, Error> = db.migrate(migrations()).await;
             match second {
                 Ok(done) => assert(done),
                 Err(e) => assert_eq(e.message(), "no error"),
@@ -1181,7 +1277,7 @@ async fn migrate_on_a_missing_folder_is_an_error_naming_it() {
 }
 
 // On a fresh in-memory SQLite database on every leg: a server database
-// already holds the history of `migrations`, which this folder lacks, so
+// already holds the history of `migrations()`, which this folder lacks, so
 // sqlx would stop at that before running the failing file.
 #[test]
 async fn a_failed_migration_is_an_error_naming_its_version() {
@@ -1205,7 +1301,7 @@ async fn a_failed_migration_is_an_error_naming_its_version() {
 // `Task::all` gives it as soon as the migration returns.
 async fn migrate_then_stop() -> Result<bool, Error> {
     let db = crate::connect_with(url(), 1).await?;
-    let _migrated = db.migrate("migrations").await?;
+    let _migrated = db.migrate(migrations()).await?;
     Err(Error::new("migrated"))
 }
 
@@ -1217,7 +1313,7 @@ async fn give_up() -> Result<bool, Error> {
 
 // A failed `migrate` on Postgres or MySQL releases sqlx's migration lock,
 // so another pool's `migrate` on the same database returns. The failing
-// folder lacks the versions of `migrations`, which the server database
+// folder lacks the versions of `migrations()`, which the server database
 // holds, so sqlx stops after taking the lock.
 #[test]
 async fn a_failed_migration_releases_the_lock() {
@@ -1227,7 +1323,7 @@ async fn a_failed_migration_releases_the_lock() {
     let opened: Result<crate::Pool, Error> = crate::connect_with(url(), 1).await;
     match opened {
         Ok(db) => {
-            let first: Result<bool, Error> = db.migrate("migrations").await;
+            let first: Result<bool, Error> = db.migrate(migrations()).await;
             assert(first.is_ok());
             let failed: Result<bool, Error> = db.migrate("testdata/failing_migration").await;
             assert(failed.is_err());
@@ -1246,9 +1342,9 @@ async fn a_failed_migration_releases_the_lock() {
 // An in-memory SQLite database is one database for the whole pool, even
 // with sqlx's default of ten connections: the migration, the write, and
 // the read below see the same tables.
-async fn memory_round_trip() -> Result<i64, Error> {
-    let db = crate::connect("sqlite::memory:").await?;
-    let _migrated = db.migrate("migrations").await?;
+async fn memory_round_trip(url: string) -> Result<i64, Error> {
+    let db = crate::connect(url).await?;
+    let _migrated = db.migrate("migrations/sqlite").await?;
     let _added = db.run("insert into users (test, id, name) values ('memory', 1, 'Ada')").await?;
     let other = db.clone();
     let _more = other.run("insert into users (test, id, name) values ('memory', 2, 'Alan')").await?;
@@ -1257,7 +1353,28 @@ async fn memory_round_trip() -> Result<i64, Error> {
 
 #[test]
 async fn an_in_memory_database_is_one_database_for_the_pool() {
-    let counted: Result<i64, Error> = memory_round_trip().await;
+    let counted: Result<i64, Error> = memory_round_trip("sqlite::memory:").await;
+    match counted {
+        Ok(n) => assert_eq(n, 2),
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+// `sqlite://:memory:` is the same in-memory database to sqlx, and is one
+// database for the pool too.
+#[test]
+async fn the_slashed_in_memory_url_is_one_database_for_the_pool() {
+    let counted: Result<i64, Error> = memory_round_trip("sqlite://:memory:").await;
+    match counted {
+        Ok(n) => assert_eq(n, 2),
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+// A URL's scheme is read in any case, as a URL parser reads it.
+#[test]
+async fn an_upper_case_scheme_names_the_same_database() {
+    let counted: Result<i64, Error> = memory_round_trip("SQLite::memory:").await;
     match counted {
         Ok(n) => assert_eq(n, 2),
         Err(e) => assert_eq(e.message(), "no error"),
@@ -1268,7 +1385,8 @@ struct Bio {
     bio: string,
 }
 
-// MySQL reports a `text` column as bytes; UTF-8 bytes read as text.
+// A MySQL `text` column, which sqlx names `TEXT`, reads into a `string`,
+// past 255 bytes and with characters outside ASCII.
 #[test]
 async fn a_mysql_text_column_reads_into_a_string() {
     if !url().starts_with("mysql") {
@@ -1292,34 +1410,154 @@ async fn a_mysql_text_column_reads_into_a_string() {
     }
 }
 
-// MySQL reads an unsigned integer as signed, so the README's cast reads
-// one at or above 2^31 (or 2^63) correctly. The table is the session's
-// own, on the test's one connection.
+struct Label {
+    label: string,
+}
+
+// MySQL names a text column with a binary collation `VARBINARY`, as it
+// does a binary column; UTF-8 bytes in either read into a `string`, and
+// a `string` field refuses other bytes, an `Error` naming the column. The
+// table is the session's own, on the test's one connection.
 #[test]
-async fn a_mysql_unsigned_integer_reads_through_the_documented_cast() {
+async fn a_mysql_binary_collation_column_reads_into_a_string() {
     if !url().starts_with("mysql") {
         return;
     }
     let opened: Result<crate::Pool, Error> = crate::connect_with(url(), 1).await;
     match opened {
         Ok(db) => {
-            let made: Result<u64, Error> = db.run("create temporary table unsigned_values (tiny smallint unsigned, small int unsigned, big bigint unsigned)").await;
+            let made: Result<u64, Error> = db.run("create temporary table labels (id integer, label varchar(100) collate utf8mb4_bin, raw varbinary(10))").await;
             assert(made.is_ok());
-            let added: Result<u64, Error> = db.run("insert into unsigned_values (tiny, small, big) values (65535, 3000000000, 18446744073709551615)").await;
+            let added: Result<u64, Error> = db.run("insert into labels (id, label, raw) values (1, 'née', unhex('ff'))").await;
             assert(added.is_ok());
-            let tiny: Result<i64, Error> = db.one("select cast(tiny as signed) from unsigned_values").await;
+            let text: Result<Label, Error> = db.one("select label from labels where id = 1").await;
+            match text {
+                Ok(l) => assert_eq(l.label, "née"),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            let bytes: Result<Label, Error> = db.one("select raw as label from labels where id = 1").await;
+            match bytes {
+                Ok(_) => assert(false),
+                Err(e) => assert_eq(e.message(), "column `label` cannot be read into the field"),
+            }
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+struct Size {
+    size: string,
+}
+
+// A MySQL `enum` column reads into a `string` as its text. The table is
+// the session's own, on the test's one connection.
+#[test]
+async fn a_mysql_enum_column_reads_into_a_string() {
+    if !url().starts_with("mysql") {
+        return;
+    }
+    let opened: Result<crate::Pool, Error> = crate::connect_with(url(), 1).await;
+    match opened {
+        Ok(db) => {
+            let made: Result<u64, Error> = db.run("create temporary table sizes (id integer, size enum('small', 'large'))").await;
+            assert(made.is_ok());
+            let added: Result<u64, Error> = db.run("insert into sizes (id, size) values (1, 'large')").await;
+            assert(added.is_ok());
+            let read: Result<Size, Error> = db.one("select size from sizes where id = 1").await;
+            match read {
+                Ok(s) => assert_eq(s.size, "large"),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+// A MySQL unsigned integer of every width, `tinyint(1) unsigned`, which
+// sqlx names `BOOLEAN`, among them, reads as unsigned with no cast, into a
+// field whose range holds it, and is an `Error` naming the column in one
+// whose range does not. The table is the session's own, on the test's one
+// connection.
+#[test]
+async fn a_mysql_unsigned_integer_reads_with_no_cast() {
+    if !url().starts_with("mysql") {
+        return;
+    }
+    let opened: Result<crate::Pool, Error> = crate::connect_with(url(), 1).await;
+    match opened {
+        Ok(db) => {
+            let made: Result<u64, Error> = db.run("create temporary table unsigned_values (byte tinyint unsigned, flag tinyint(1) unsigned, medium mediumint unsigned, tiny smallint unsigned, small int unsigned, big bigint unsigned)").await;
+            assert(made.is_ok());
+            let added: Result<u64, Error> = db.run("insert into unsigned_values (byte, flag, medium, tiny, small, big) values (255, 200, 16777215, 65535, 3000000000, 18446744073709551615)").await;
+            assert(added.is_ok());
+            let byte: Result<i64, Error> = db.one("select byte from unsigned_values").await;
+            match byte {
+                Ok(n) => assert_eq(n, 255),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            let flag: Result<i64, Error> = db.one("select flag from unsigned_values").await;
+            match flag {
+                Ok(n) => assert_eq(n, 200),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            let medium: Result<i64, Error> = db.one("select medium from unsigned_values").await;
+            match medium {
+                Ok(n) => assert_eq(n, 16777215),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            let tiny: Result<i64, Error> = db.one("select tiny from unsigned_values").await;
             match tiny {
                 Ok(n) => assert_eq(n, 65535),
                 Err(e) => assert_eq(e.message(), "no error"),
             }
-            let small: Result<i64, Error> = db.one("select cast(small as signed) from unsigned_values").await;
+            let small: Result<i64, Error> = db.one("select small from unsigned_values").await;
             match small {
                 Ok(n) => assert_eq(n, 3000000000),
                 Err(e) => assert_eq(e.message(), "no error"),
             }
-            let big: Result<string, Error> = db.one("select cast(big as char) from unsigned_values").await;
+            let big: Result<u64, Error> = db.one("select big from unsigned_values").await;
             match big {
-                Ok(text) => assert_eq(text, "18446744073709551615"),
+                Ok(n) => assert_eq(n, 18446744073709551615),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            let too_big: Result<i64, Error> = db.one("select big from unsigned_values").await;
+            match too_big {
+                Ok(_) => assert(false),
+                Err(e) => assert(e.message().contains("`big`") && e.message().contains("range of an `i64`")),
+            }
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+// MySQL's small integers and its `boolean`, which is `tinyint(1)`, read
+// with no cast. The table is the session's own, on the test's one
+// connection.
+#[test]
+async fn a_mysql_tinyint_mediumint_and_boolean_read_with_no_cast() {
+    if !url().starts_with("mysql") {
+        return;
+    }
+    let opened: Result<crate::Pool, Error> = crate::connect_with(url(), 1).await;
+    match opened {
+        Ok(db) => {
+            let made: Result<u64, Error> = db.run("create temporary table small_values (tiny tinyint, medium mediumint, flag boolean)").await;
+            assert(made.is_ok());
+            let added: Result<u64, Error> = db.run("insert into small_values (tiny, medium, flag) values (-5, -8388608, true)").await;
+            assert(added.is_ok());
+            let tiny: Result<i8, Error> = db.one("select tiny from small_values").await;
+            match tiny {
+                Ok(n) => assert_eq(n, -5),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            let medium: Result<i64, Error> = db.one("select medium from small_values").await;
+            match medium {
+                Ok(n) => assert_eq(n, -8388608),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            let flag: Result<bool, Error> = db.one("select flag from small_values").await;
+            match flag {
+                Ok(b) => assert(b),
                 Err(e) => assert_eq(e.message(), "no error"),
             }
         }
@@ -1400,6 +1638,570 @@ async fn a_generated_id_reads_through_returning() {
             match second {
                 Ok(id) => assert_eq(id, 2),
                 Err(e) => assert_eq(e.message(), "no error"),
+            }
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+// Time, ids, and bytes, bound into `kinds`, whose column types differ by
+// database: `timestamptz`, `uuid`, and `bytea` on Postgres, `datetime(6)`,
+// `char(36)`, and `blob` on MySQL, and `text`, `text`, and `blob` on
+// SQLite.
+
+// Binds a `Time`, a `Uuid`, and a `Bytes` into a row of `kinds_found`, and
+// counts the rows the same three values find.
+async fn found_again(db: crate::Pool) -> Result<i64, Error> {
+    let at = Time::from_iso("2026-10-07T12:00:00.123456Z")?;
+    let uid: Uuid = "0192f0c4-7a3e-7b5c-9d1e-2f3a4b5c6d7e".parse()?;
+    let data = Bytes::from_text("hello, world");
+    if pg() {
+        let _added = db.run("insert into kinds (test, id, at, uid, data) values ('kinds_found', 1, $1, $2, $3)", at, uid, data).await?;
+        db.one("select count(*) from kinds where test = 'kinds_found' and at = $1 and uid = $2 and data = $3", at, uid, data).await
+    } else {
+        let _added = db.run("insert into kinds (test, id, at, uid, data) values ('kinds_found', 1, ?, ?, ?)", at, uid, data).await?;
+        db.one("select count(*) from kinds where test = 'kinds_found' and at = ? and uid = ? and data = ?", at, uid, data).await
+    }
+}
+
+#[test]
+async fn a_time_a_uuid_and_bytes_bind_and_find_their_row() {
+    let opened: Result<crate::Pool, Error> = ready("kinds_found").await;
+    match opened {
+        Ok(db) => {
+            let found: Result<i64, Error> = found_again(db).await;
+            match found {
+                Ok(n) => assert_eq(n, 1),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+// Binds a `Uuid` read from upper-case text into `kinds_uid`, and reads the
+// column back as text.
+async fn uid_as_text(db: crate::Pool) -> Result<string, Error> {
+    let uid: Uuid = "0192F0C4-7A3E-7B5C-9D1E-2F3A4B5C6D7E".parse()?;
+    let _added = db.run("insert into kinds (test, id, uid) values ('kinds_uid', 1, ?)", uid).await?;
+    db.one("select uid from kinds where test = 'kinds_uid'").await
+}
+
+// On MySQL and SQLite a `Uuid` is stored as its written form: 36
+// characters, lower case.
+#[test]
+async fn a_uuid_binds_as_its_lower_case_text_off_postgres() {
+    if pg() {
+        return;
+    }
+    let opened: Result<crate::Pool, Error> = ready("kinds_uid").await;
+    match opened {
+        Ok(db) => {
+            let read: Result<string, Error> = uid_as_text(db).await;
+            match read {
+                Ok(text) => {
+                    assert_eq(text.len(), 36);
+                    assert_eq(text, "0192f0c4-7a3e-7b5c-9d1e-2f3a4b5c6d7e");
+                }
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+// Binds a `Time` with no fraction and one with half a second into
+// `kinds_text`, and reads the column back as text.
+async fn times_as_text(db: crate::Pool) -> Result<Vec<string>, Error> {
+    let whole = Time::from_iso("2026-10-07T12:00:00Z")?;
+    let half = Time::from_iso("2026-10-07T12:00:00.5Z")?;
+    let _added = db.run("insert into kinds (test, id, at) values ('kinds_text', 1, ?), ('kinds_text', 2, ?)", whole, half).await?;
+    db.all("select at from kinds where test = 'kinds_text' order by id").await
+}
+
+// On SQLite a `Time` is stored as text of a fixed width, six fraction
+// digits whatever the time.
+#[test]
+async fn a_sqlite_time_binds_as_fixed_width_text() {
+    if !url().starts_with("sqlite") {
+        return;
+    }
+    let opened: Result<crate::Pool, Error> = ready("kinds_text").await;
+    match opened {
+        Ok(db) => {
+            let read: Result<Vec<string>, Error> = times_as_text(db).await;
+            match read {
+                Ok(texts) => {
+                    assert_eq(texts.len(), 2);
+                    assert_eq(texts[0], "2026-10-07T12:00:00.000000Z");
+                    assert_eq(texts[1], "2026-10-07T12:00:00.500000Z");
+                }
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+// Binds a `Time` with a fraction as row 1 of `kinds_order` and one half a
+// second earlier with none as row 2, and reads the ids in time order.
+async fn ids_in_time_order(db: crate::Pool) -> Result<Vec<i64>, Error> {
+    let later = Time::from_iso("2026-10-07T12:00:00.5Z")?;
+    let earlier = Time::from_iso("2026-10-07T12:00:00Z")?;
+    let _added = if pg() {
+        db.run("insert into kinds (test, id, at) values ('kinds_order', 1, $1), ('kinds_order', 2, $2)", later, earlier).await?
+    } else {
+        db.run("insert into kinds (test, id, at) values ('kinds_order', 1, ?), ('kinds_order', 2, ?)", later, earlier).await?
+    };
+    db.all("select id from kinds where test = 'kinds_order' order by at").await
+}
+
+// `order by` in SQL puts times in the order `<` in Varyk does, SQLite's
+// text among them.
+#[test]
+async fn times_come_back_in_time_order() {
+    let opened: Result<crate::Pool, Error> = ready("kinds_order").await;
+    match opened {
+        Ok(db) => {
+            let read: Result<Vec<i64>, Error> = ids_in_time_order(db).await;
+            match read {
+                Ok(ids) => {
+                    assert_eq(ids.len(), 2);
+                    assert_eq(ids[0], 2);
+                    assert_eq(ids[1], 1);
+                }
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+// Binds `None` as an `Option<Time>`, an `Option<Uuid>`, and an
+// `Option<Bytes>` into `kinds_none`, and counts the rows with three
+// `NULL`s.
+async fn nones_stored(db: crate::Pool) -> Result<i64, Error> {
+    let at: Option<Time> = None;
+    let uid: Option<Uuid> = None;
+    let data: Option<Bytes> = None;
+    let _added = if pg() {
+        db.run("insert into kinds (test, id, at, uid, data) values ('kinds_none', 1, $1, $2, $3)", at, uid, data).await?
+    } else {
+        db.run("insert into kinds (test, id, at, uid, data) values ('kinds_none', 1, ?, ?, ?)", at, uid, data).await?
+    };
+    db.one("select count(*) from kinds where test = 'kinds_none' and at is null and uid is null and data is null").await
+}
+
+// `None` stores `NULL` in each column, with no cast on Postgres, whose
+// untyped `NULL` takes its type from the column.
+#[test]
+async fn none_binds_null_into_time_uuid_and_bytes_columns() {
+    let opened: Result<crate::Pool, Error> = ready("kinds_none").await;
+    match opened {
+        Ok(db) => {
+            let counted: Result<i64, Error> = nones_stored(db).await;
+            match counted {
+                Ok(n) => assert_eq(n, 1),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+// Binds half a second before 1970 into `kinds_1969`, and counts the rows
+// whose `at` is the database's own literal for that instant.
+async fn before_1970(db: crate::Pool) -> Result<i64, Error> {
+    let at = Time::from_iso("1969-12-31T23:59:59.5Z")?;
+    if pg() {
+        let _added = db.run("insert into kinds (test, id, at) values ('kinds_1969', 1, $1)", at).await?;
+        db.one("select count(*) from kinds where test = 'kinds_1969' and at = timestamptz '1969-12-31 23:59:59.5+00'").await
+    } else if url().starts_with("mysql") {
+        let _added = db.run("insert into kinds (test, id, at) values ('kinds_1969', 1, ?)", at).await?;
+        db.one("select count(*) from kinds where test = 'kinds_1969' and at = timestamp '1969-12-31 23:59:59.5'").await
+    } else {
+        let _added = db.run("insert into kinds (test, id, at) values ('kinds_1969', 1, ?)", at).await?;
+        db.one("select count(*) from kinds where test = 'kinds_1969' and at = '1969-12-31T23:59:59.500000Z'").await
+    }
+}
+
+// A time before 1970 with a fraction is the same instant in the database:
+// its negative microseconds are split with Euclidean division.
+#[test]
+async fn a_time_before_1970_with_a_fraction_is_the_same_instant() {
+    let opened: Result<crate::Pool, Error> = ready("kinds_1969").await;
+    match opened {
+        Ok(db) => {
+            let counted: Result<i64, Error> = before_1970(db).await;
+            match counted {
+                Ok(n) => assert_eq(n, 1),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+// Binds an empty `Bytes` into `kinds_empty`, and counts the rows whose
+// `data` is not `NULL` and is empty.
+async fn empty_bytes(db: crate::Pool) -> Result<i64, Error> {
+    let data = Bytes::from_text("");
+    let _added = if pg() {
+        db.run("insert into kinds (test, id, data) values ('kinds_empty', 1, $1)", data).await?
+    } else {
+        db.run("insert into kinds (test, id, data) values ('kinds_empty', 1, ?)", data).await?
+    };
+    // `length` is 0 for empty text too, so SQLite also checks the value
+    // is a blob.
+    if pg() || url().starts_with("mysql") {
+        db.one("select count(*) from kinds where test = 'kinds_empty' and data is not null and length(data) = 0").await
+    } else {
+        db.one("select count(*) from kinds where test = 'kinds_empty' and typeof(data) = 'blob' and length(data) = 0").await
+    }
+}
+
+// An empty `Bytes` is a value of no bytes, not `NULL`.
+#[test]
+async fn empty_bytes_bind_as_no_bytes_not_null() {
+    let opened: Result<crate::Pool, Error> = ready("kinds_empty").await;
+    match opened {
+        Ok(db) => {
+            let counted: Result<i64, Error> = empty_bytes(db).await;
+            match counted {
+                Ok(n) => assert_eq(n, 1),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+// Reading the three types. Each field of `Kinds` asks for a string, and
+// takes a time or an id column as its written form and a binary column
+// raw.
+struct Kinds {
+    at: Time,
+    uid: Uuid,
+    data: Bytes,
+}
+
+struct MaybeKinds {
+    at: Option<Time>,
+    uid: Option<Uuid>,
+    data: Option<Bytes>,
+}
+
+struct Times {
+    at: Time,
+}
+
+struct MaybeTimes {
+    at: Option<Time>,
+}
+
+struct Ids {
+    uid: Uuid,
+}
+
+// The time and the id the reading tests write.
+fn a_time() -> Result<Time, Error> {
+    Time::from_iso("2026-10-07T12:00:00.123456Z")
+}
+
+fn a_uid() -> Result<Uuid, Error> {
+    "0192f0c4-7a3e-7b5c-9d1e-2f3a4b5c6d7e".parse()
+}
+
+// Writes row 1 of `kinds_read` with a time, an id, and bytes, and row 2
+// with `None` in each, then reads them back as a struct, as scalars, and
+// as `Option`s of each; an `Error` names the first read that differs.
+async fn kinds_read_back(db: crate::Pool) -> Result<bool, Error> {
+    let at = a_time()?;
+    let uid = a_uid()?;
+    let data = Bytes::from_text("hello, world");
+    let no_at: Option<Time> = None;
+    let no_uid: Option<Uuid> = None;
+    let no_data: Option<Bytes> = None;
+    let _added = if pg() {
+        db.run("insert into kinds (test, id, at, uid, data) values ('kinds_read', 1, $1, $2, $3), ('kinds_read', 2, $4, $5, $6)", at, uid, data, no_at, no_uid, no_data).await?
+    } else {
+        db.run("insert into kinds (test, id, at, uid, data) values ('kinds_read', 1, ?, ?, ?), ('kinds_read', 2, ?, ?, ?)", at, uid, data, no_at, no_uid, no_data).await?
+    };
+    let row: Kinds = db.one("select at, uid, data from kinds where test = 'kinds_read' and id = 1").await?;
+    if row.at != at || row.uid != uid || row.data != data {
+        return Err(Error::new("a field of the struct differs"));
+    }
+    let one_at: Time = db.one("select at from kinds where test = 'kinds_read' and id = 1").await?;
+    let one_uid: Uuid = db.one("select uid from kinds where test = 'kinds_read' and id = 1").await?;
+    let one_data: Bytes = db.one("select data from kinds where test = 'kinds_read' and id = 1").await?;
+    if one_at != at || one_uid != uid || one_data != data {
+        return Err(Error::new("a scalar differs"));
+    }
+    let some: MaybeKinds = db.one("select at, uid, data from kinds where test = 'kinds_read' and id = 1").await?;
+    if some.at != Some(at) || some.uid != Some(uid) || some.data != Some(data.clone()) {
+        return Err(Error::new("an `Option` field with a value differs"));
+    }
+    let none: MaybeKinds = db.one("select at, uid, data from kinds where test = 'kinds_read' and id = 2").await?;
+    if none.at.is_some() || none.uid.is_some() || none.data.is_some() {
+        return Err(Error::new("an `Option` field of `NULL` is not `None`"));
+    }
+    let some_at: Option<Time> = db.one("select at from kinds where test = 'kinds_read' and id = 1").await?;
+    let some_uid: Option<Uuid> = db.one("select uid from kinds where test = 'kinds_read' and id = 1").await?;
+    let some_data: Option<Bytes> = db.one("select data from kinds where test = 'kinds_read' and id = 1").await?;
+    if some_at != Some(at) || some_uid != Some(uid) || some_data != Some(data.clone()) {
+        return Err(Error::new("an `Option` scalar with a value differs"));
+    }
+    let none_at: Option<Time> = db.one("select at from kinds where test = 'kinds_read' and id = 2").await?;
+    let none_uid: Option<Uuid> = db.one("select uid from kinds where test = 'kinds_read' and id = 2").await?;
+    let none_data: Option<Bytes> = db.one("select data from kinds where test = 'kinds_read' and id = 2").await?;
+    if none_at.is_some() || none_uid.is_some() || none_data.is_some() {
+        return Err(Error::new("an `Option` scalar of `NULL` is not `None`"));
+    }
+    Ok(true)
+}
+
+#[test]
+async fn a_time_a_uuid_and_bytes_read_back_equal() {
+    let opened: Result<crate::Pool, Error> = ready("kinds_read").await;
+    match opened {
+        Ok(db) => {
+            let read: Result<bool, Error> = kinds_read_back(db).await;
+            match read {
+                Ok(same) => assert(same),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+// Binds a time into `stamp`, a timestamp with no zone, of row 1 of
+// `kinds_stamp`, and reads it back.
+async fn stamp_read_back(db: crate::Pool) -> Result<bool, Error> {
+    let at = a_time()?;
+    let _added = if pg() {
+        db.run("insert into kinds (test, id, stamp) values ('kinds_stamp', 1, $1)", at).await?
+    } else {
+        db.run("insert into kinds (test, id, stamp) values ('kinds_stamp', 1, ?)", at).await?
+    };
+    let read: Time = db.one("select stamp from kinds where test = 'kinds_stamp'").await?;
+    Ok(read == at)
+}
+
+// A Postgres `timestamp` and a MySQL `timestamp(6)` read into a `Time`
+// equal to the one written: the session's time zone is UTC.
+#[test]
+async fn a_timestamp_with_no_zone_reads_into_the_time_written() {
+    if url().starts_with("sqlite") {
+        return;
+    }
+    let opened: Result<crate::Pool, Error> = ready("kinds_stamp").await;
+    match opened {
+        Ok(db) => {
+            let read: Result<bool, Error> = stamp_read_back(db).await;
+            match read {
+                Ok(same) => assert(same),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+// Binds a time with half a second and an id into `kinds_as_text`, and
+// reads each column into a `string`.
+async fn kinds_as_text(db: crate::Pool) -> Result<Vec<string>, Error> {
+    let at = Time::from_iso("2026-10-07T12:00:00.5Z")?;
+    let uid = a_uid()?;
+    let _added = if pg() {
+        db.run("insert into kinds (test, id, at, uid) values ('kinds_as_text', 1, $1, $2)", at, uid).await?
+    } else {
+        db.run("insert into kinds (test, id, at, uid) values ('kinds_as_text', 1, ?, ?)", at, uid).await?
+    };
+    let at_text: string = db.one("select at from kinds where test = 'kinds_as_text'").await?;
+    let uid_text: string = db.one("select uid from kinds where test = 'kinds_as_text'").await?;
+    Ok(vec![at_text, uid_text])
+}
+
+// An id column reads into a `string` as the id's written form on every
+// database, and a time column as the time's written form on Postgres and
+// MySQL and as its fixed-width text on SQLite.
+#[test]
+async fn a_time_and_a_uuid_read_into_a_string() {
+    let opened: Result<crate::Pool, Error> = ready("kinds_as_text").await;
+    match opened {
+        Ok(db) => {
+            let read: Result<Vec<string>, Error> = kinds_as_text(db).await;
+            match read {
+                Ok(texts) => {
+                    assert_eq(texts.len(), 2);
+                    if url().starts_with("sqlite") {
+                        assert_eq(texts[0], "2026-10-07T12:00:00.500000Z");
+                    } else {
+                        assert_eq(texts[0], "2026-10-07T12:00:00.5Z");
+                    }
+                    assert_eq(texts[1], "0192f0c4-7a3e-7b5c-9d1e-2f3a4b5c6d7e");
+                }
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+// Binds the 16 bytes of `a_uid()` into `data` of `kinds_16`, and reads
+// them into a `Uuid` and into a `Bytes`.
+async fn sixteen_bytes(db: crate::Pool) -> Result<bool, Error> {
+    let bytes = Bytes::from_base64("AZLwxHo+e1ydHi86S1xtfg==")?;
+    let _added = if pg() {
+        db.run("insert into kinds (test, id, data) values ('kinds_16', 1, $1)", bytes).await?
+    } else {
+        db.run("insert into kinds (test, id, data) values ('kinds_16', 1, ?)", bytes).await?
+    };
+    let uid: Uuid = db.one("select data from kinds where test = 'kinds_16'").await?;
+    if uid != a_uid()? {
+        return Err(Error::new("the id read from 16 bytes differs"));
+    }
+    let data: Bytes = db.one("select data from kinds where test = 'kinds_16'").await?;
+    if data.len() != 16 || data != bytes {
+        return Err(Error::new("the bytes read back differ"));
+    }
+    Ok(true)
+}
+
+// 16 bytes in a binary column read into a `Uuid`, the id whose bytes they
+// are, and into a `Bytes`.
+#[test]
+async fn sixteen_bytes_read_into_a_uuid_and_into_bytes() {
+    let opened: Result<crate::Pool, Error> = ready("kinds_16").await;
+    match opened {
+        Ok(db) => {
+            let read: Result<bool, Error> = sixteen_bytes(db).await;
+            match read {
+                Ok(same) => assert(same),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+// Text that is not a uuid, in SQLite's `text` and MySQL's `char(36)`
+// column and a Postgres `text` value, is the field's refusal: an `Error`
+// naming the column and none of the text.
+#[test]
+async fn a_malformed_uuid_is_an_error_naming_the_column_not_the_text() {
+    let opened: Result<crate::Pool, Error> = ready("kinds_bad_uid").await;
+    match opened {
+        Ok(db) => {
+            let read: Result<Ids, Error> = if pg() {
+                db.one("select '0192f0c4-7a3e-7b5c-9d1e-2f3a4b5cqqqq'::text as uid").await
+            } else {
+                let added: Result<u64, Error> = db.run("insert into kinds (test, id, uid) values ('kinds_bad_uid', 1, '0192f0c4-7a3e-7b5c-9d1e-2f3a4b5cqqqq')").await;
+                assert(added.is_ok());
+                db.one("select uid from kinds where test = 'kinds_bad_uid'").await
+            };
+            match read {
+                Ok(_) => assert(false),
+                Err(e) => {
+                    assert_eq(e.message(), "column `uid` cannot be read into the field");
+                    assert(!e.message().contains("0192f0c4"));
+                    assert(!e.message().contains("qqqq"));
+                }
+            }
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+// A SQLite time text that `Time` does not read is the field's refusal,
+// naming the column and none of the text.
+#[test]
+async fn a_malformed_sqlite_time_is_an_error_naming_the_column_not_the_text() {
+    if !url().starts_with("sqlite") {
+        return;
+    }
+    let opened: Result<crate::Pool, Error> = ready("kinds_bad_at").await;
+    match opened {
+        Ok(db) => {
+            let added: Result<u64, Error> = db.run("insert into kinds (test, id, at) values ('kinds_bad_at', 1, '2026-10-07 12:00:00')").await;
+            assert(added.is_ok());
+            let read: Result<Times, Error> = db.one("select at from kinds where test = 'kinds_bad_at'").await;
+            match read {
+                Ok(_) => assert(false),
+                Err(e) => {
+                    assert_eq(e.message(), "column `at` cannot be read into the field");
+                    assert(!e.message().contains("2026"));
+                    assert(!e.message().contains("12:00"));
+                }
+            }
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+// A Postgres `infinity`, `-infinity`, and a time past the year 9999 read
+// into a `Time` are one `Error`, naming the column and none of the value.
+#[test]
+async fn a_postgres_time_out_of_range_is_an_error_naming_the_column() {
+    if !pg() {
+        return;
+    }
+    let opened: Result<crate::Pool, Error> = crate::connect_with(url(), 1).await;
+    match opened {
+        Ok(db) => {
+            let infinity: Result<Times, Error> = db.one("select 'infinity'::timestamptz as at").await;
+            let message = match infinity {
+                Ok(_) => "no error",
+                Err(e) => e.message().clone(),
+            };
+            assert_eq(message, "column `at` holds a time out of the range of a `Time`");
+            assert(!message.contains("infinity"));
+            let before: Result<Times, Error> = db.one("select '-infinity'::timestamptz as at").await;
+            match before {
+                Ok(_) => assert(false),
+                Err(e) => assert_eq(e.message(), message),
+            }
+            let late: Result<Times, Error> = db.one("select '10000-01-01T00:00:00Z'::timestamptz as at").await;
+            match late {
+                Ok(_) => assert(false),
+                Err(e) => {
+                    assert_eq(e.message(), message);
+                    assert(!e.message().contains("10000"));
+                }
+            }
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+// A MySQL zero date, stored once the session's `sql_mode` allows it, read
+// into a `Time` and into an `Option<Time>` is an `Error` naming the
+// column, not a `Time` and not `None`. The table and the mode are the
+// session's own, on the test's one connection.
+#[test]
+async fn a_mysql_zero_date_is_an_error_naming_the_column() {
+    if !url().starts_with("mysql") {
+        return;
+    }
+    let opened: Result<crate::Pool, Error> = crate::connect_with(url(), 1).await;
+    match opened {
+        Ok(db) => {
+            let mode: Result<u64, Error> = db.run("set session sql_mode = ''").await;
+            assert(mode.is_ok());
+            let made: Result<u64, Error> = db.run("create temporary table zero_times (at datetime)").await;
+            assert(made.is_ok());
+            let added: Result<u64, Error> = db.run("insert into zero_times (at) values ('0000-00-00 00:00:00')").await;
+            assert(added.is_ok());
+            let read: Result<Times, Error> = db.one("select at from zero_times").await;
+            match read {
+                Ok(_) => assert(false),
+                Err(e) => assert_eq(e.message(), "column `at` cannot be decoded"),
+            }
+            let maybe: Result<MaybeTimes, Error> = db.one("select at from zero_times").await;
+            match maybe {
+                Ok(_) => assert(false),
+                Err(e) => assert_eq(e.message(), "column `at` cannot be decoded"),
             }
         }
         Err(e) => assert_eq(e.message(), "no error"),
