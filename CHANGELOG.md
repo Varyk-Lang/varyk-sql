@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/Varyk-Lang/varyk-sql/compare/v0.3.0...v0.4.0) (2026-10-10)
+
+
+### Features
+
+* $1 placeholders on every database ([287f1a2](https://github.com/Varyk-Lang/varyk-sql/commit/287f1a2a4ad647a2cd710150ae08c0d870f284ce))
+
 ## [0.3.0](https://github.com/Varyk-Lang/varyk-sql/compare/v0.2.0...v0.3.0) (2026-10-07)
 
 
