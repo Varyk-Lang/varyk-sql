@@ -141,16 +141,8 @@ fn migrations() -> string {
 async fn ready(test: string) -> Result<crate::Pool, Error> {
     let db = crate::connect_with(url(), 1).await?;
     let _migrated = db.migrate(migrations()).await?;
-    let _deleted: u64 = if pg() {
-        db.run("delete from users where test = $1", test).await?
-    } else {
-        db.run("delete from users where test = ?", test).await?
-    };
-    let _kinds: u64 = if pg() {
-        db.run("delete from kinds where test = $1", test).await?
-    } else {
-        db.run("delete from kinds where test = ?", test).await?
-    };
+    let _deleted: u64 = db.run("delete from users where test = $1", test).await?;
+    let _kinds: u64 = db.run("delete from kinds where test = $1", test).await?;
     Ok(db)
 }
 
@@ -466,11 +458,7 @@ async fn a_none_value_binds_null() {
     match opened {
         Ok(db) => {
             let nick: Option<string> = None;
-            let added: Result<u64, Error> = if pg() {
-                db.run("insert into users (test, id, name, nick) values ('none_binds_null', 1, 'Ada', $1)", nick).await
-            } else {
-                db.run("insert into users (test, id, name, nick) values ('none_binds_null', 1, 'Ada', ?)", nick).await
-            };
+            let added: Result<u64, Error> = db.run("insert into users (test, id, name, nick) values ('none_binds_null', 1, 'Ada', $1)", nick).await;
             assert(added.is_ok());
             let read: Result<Option<string>, Error> = db.one("select nick from users where test = 'none_binds_null'").await;
             match read {
@@ -490,20 +478,12 @@ async fn a_none_value_binds_null() {
 // Sets the nick of row 1 of `none_then_text`, always with the same query
 // text, so each call runs the statement the first one ran.
 async fn set_nick(db: crate::Pool, nick: Option<string>) -> Result<u64, Error> {
-    if pg() {
-        db.run("update users set nick = $1 where test = 'none_then_text' and id = 1", nick).await
-    } else {
-        db.run("update users set nick = ? where test = 'none_then_text' and id = 1", nick).await
-    }
+    db.run("update users set nick = $1 where test = 'none_then_text' and id = 1", nick).await
 }
 
 // Sets the score of row 1 of `none_then_text` the same way.
 async fn set_score(db: crate::Pool, score: Option<f64>) -> Result<u64, Error> {
-    if pg() {
-        db.run("update users set score = $1 where test = 'none_then_text' and id = 1", score).await
-    } else {
-        db.run("update users set score = ? where test = 'none_then_text' and id = 1", score).await
-    }
+    db.run("update users set score = $1 where test = 'none_then_text' and id = 1", score).await
 }
 
 // A statement first run with `None` and then with a value stores the
@@ -757,11 +737,7 @@ async fn text_into_an_integer_column_is_a_database_error() {
     let opened: Result<crate::Pool, Error> = ready("text_into_integer").await;
     match opened {
         Ok(db) => {
-            let added: Result<u64, Error> = if pg() {
-                db.run("insert into users (test, id, name, age) values ('text_into_integer', 1, 'Ada', $1)", "abc").await
-            } else {
-                db.run("insert into users (test, id, name, age) values ('text_into_integer', 1, 'Ada', ?)", "abc").await
-            };
+            let added: Result<u64, Error> = db.run("insert into users (test, id, name, age) values ('text_into_integer', 1, 'Ada', $1)", "abc").await;
             if url().starts_with("sqlite:") {
                 // SQLite keeps the text in an integer column.
                 match added {
@@ -1621,20 +1597,12 @@ async fn a_generated_id_reads_through_returning() {
                 db.run("create temporary table new_ids (id integer primary key, name text not null)").await
             };
             assert(made.is_ok());
-            let first: Result<i64, Error> = if pg() {
-                db.one("insert into new_ids (name) values ($1) returning id", "Ada").await
-            } else {
-                db.one("insert into new_ids (name) values (?) returning id", "Ada").await
-            };
+            let first: Result<i64, Error> = db.one("insert into new_ids (name) values ($1) returning id", "Ada").await;
             match first {
                 Ok(id) => assert_eq(id, 1),
                 Err(e) => assert_eq(e.message(), "no error"),
             }
-            let second: Result<i64, Error> = if pg() {
-                db.one("insert into new_ids (name) values ($1) returning id", "Alan").await
-            } else {
-                db.one("insert into new_ids (name) values (?) returning id", "Alan").await
-            };
+            let second: Result<i64, Error> = db.one("insert into new_ids (name) values ($1) returning id", "Alan").await;
             match second {
                 Ok(id) => assert_eq(id, 2),
                 Err(e) => assert_eq(e.message(), "no error"),
@@ -1655,13 +1623,8 @@ async fn found_again(db: crate::Pool) -> Result<i64, Error> {
     let at = Time::from_iso("2026-10-07T12:00:00.123456Z")?;
     let uid: Uuid = "0192f0c4-7a3e-7b5c-9d1e-2f3a4b5c6d7e".parse()?;
     let data = Bytes::from_text("hello, world");
-    if pg() {
-        let _added = db.run("insert into kinds (test, id, at, uid, data) values ('kinds_found', 1, $1, $2, $3)", at, uid, data).await?;
-        db.one("select count(*) from kinds where test = 'kinds_found' and at = $1 and uid = $2 and data = $3", at, uid, data).await
-    } else {
-        let _added = db.run("insert into kinds (test, id, at, uid, data) values ('kinds_found', 1, ?, ?, ?)", at, uid, data).await?;
-        db.one("select count(*) from kinds where test = 'kinds_found' and at = ? and uid = ? and data = ?", at, uid, data).await
-    }
+    let _added = db.run("insert into kinds (test, id, at, uid, data) values ('kinds_found', 1, $1, $2, $3)", at, uid, data).await?;
+    db.one("select count(*) from kinds where test = 'kinds_found' and at = $1 and uid = $2 and data = $3", at, uid, data).await
 }
 
 #[test]
@@ -1748,11 +1711,7 @@ async fn a_sqlite_time_binds_as_fixed_width_text() {
 async fn ids_in_time_order(db: crate::Pool) -> Result<Vec<i64>, Error> {
     let later = Time::from_iso("2026-10-07T12:00:00.5Z")?;
     let earlier = Time::from_iso("2026-10-07T12:00:00Z")?;
-    let _added = if pg() {
-        db.run("insert into kinds (test, id, at) values ('kinds_order', 1, $1), ('kinds_order', 2, $2)", later, earlier).await?
-    } else {
-        db.run("insert into kinds (test, id, at) values ('kinds_order', 1, ?), ('kinds_order', 2, ?)", later, earlier).await?
-    };
+    let _added = db.run("insert into kinds (test, id, at) values ('kinds_order', 1, $1), ('kinds_order', 2, $2)", later, earlier).await?;
     db.all("select id from kinds where test = 'kinds_order' order by at").await
 }
 
@@ -1784,11 +1743,7 @@ async fn nones_stored(db: crate::Pool) -> Result<i64, Error> {
     let at: Option<Time> = None;
     let uid: Option<Uuid> = None;
     let data: Option<Bytes> = None;
-    let _added = if pg() {
-        db.run("insert into kinds (test, id, at, uid, data) values ('kinds_none', 1, $1, $2, $3)", at, uid, data).await?
-    } else {
-        db.run("insert into kinds (test, id, at, uid, data) values ('kinds_none', 1, ?, ?, ?)", at, uid, data).await?
-    };
+    let _added = db.run("insert into kinds (test, id, at, uid, data) values ('kinds_none', 1, $1, $2, $3)", at, uid, data).await?;
     db.one("select count(*) from kinds where test = 'kinds_none' and at is null and uid is null and data is null").await
 }
 
@@ -1813,14 +1768,12 @@ async fn none_binds_null_into_time_uuid_and_bytes_columns() {
 // whose `at` is the database's own literal for that instant.
 async fn before_1970(db: crate::Pool) -> Result<i64, Error> {
     let at = Time::from_iso("1969-12-31T23:59:59.5Z")?;
+    let _added = db.run("insert into kinds (test, id, at) values ('kinds_1969', 1, $1)", at).await?;
     if pg() {
-        let _added = db.run("insert into kinds (test, id, at) values ('kinds_1969', 1, $1)", at).await?;
         db.one("select count(*) from kinds where test = 'kinds_1969' and at = timestamptz '1969-12-31 23:59:59.5+00'").await
     } else if url().starts_with("mysql") {
-        let _added = db.run("insert into kinds (test, id, at) values ('kinds_1969', 1, ?)", at).await?;
         db.one("select count(*) from kinds where test = 'kinds_1969' and at = timestamp '1969-12-31 23:59:59.5'").await
     } else {
-        let _added = db.run("insert into kinds (test, id, at) values ('kinds_1969', 1, ?)", at).await?;
         db.one("select count(*) from kinds where test = 'kinds_1969' and at = '1969-12-31T23:59:59.500000Z'").await
     }
 }
@@ -1846,11 +1799,7 @@ async fn a_time_before_1970_with_a_fraction_is_the_same_instant() {
 // `data` is not `NULL` and is empty.
 async fn empty_bytes(db: crate::Pool) -> Result<i64, Error> {
     let data = Bytes::from_text("");
-    let _added = if pg() {
-        db.run("insert into kinds (test, id, data) values ('kinds_empty', 1, $1)", data).await?
-    } else {
-        db.run("insert into kinds (test, id, data) values ('kinds_empty', 1, ?)", data).await?
-    };
+    let _added = db.run("insert into kinds (test, id, data) values ('kinds_empty', 1, $1)", data).await?;
     // `length` is 0 for empty text too, so SQLite also checks the value
     // is a blob.
     if pg() || url().starts_with("mysql") {
@@ -1922,11 +1871,7 @@ async fn kinds_read_back(db: crate::Pool) -> Result<bool, Error> {
     let no_at: Option<Time> = None;
     let no_uid: Option<Uuid> = None;
     let no_data: Option<Bytes> = None;
-    let _added = if pg() {
-        db.run("insert into kinds (test, id, at, uid, data) values ('kinds_read', 1, $1, $2, $3), ('kinds_read', 2, $4, $5, $6)", at, uid, data, no_at, no_uid, no_data).await?
-    } else {
-        db.run("insert into kinds (test, id, at, uid, data) values ('kinds_read', 1, ?, ?, ?), ('kinds_read', 2, ?, ?, ?)", at, uid, data, no_at, no_uid, no_data).await?
-    };
+    let _added = db.run("insert into kinds (test, id, at, uid, data) values ('kinds_read', 1, $1, $2, $3), ('kinds_read', 2, $4, $5, $6)", at, uid, data, no_at, no_uid, no_data).await?;
     let row: Kinds = db.one("select at, uid, data from kinds where test = 'kinds_read' and id = 1").await?;
     if row.at != at || row.uid != uid || row.data != data {
         return Err(Error::new("a field of the struct differs"));
@@ -1979,11 +1924,7 @@ async fn a_time_a_uuid_and_bytes_read_back_equal() {
 // `kinds_stamp`, and reads it back.
 async fn stamp_read_back(db: crate::Pool) -> Result<bool, Error> {
     let at = a_time()?;
-    let _added = if pg() {
-        db.run("insert into kinds (test, id, stamp) values ('kinds_stamp', 1, $1)", at).await?
-    } else {
-        db.run("insert into kinds (test, id, stamp) values ('kinds_stamp', 1, ?)", at).await?
-    };
+    let _added = db.run("insert into kinds (test, id, stamp) values ('kinds_stamp', 1, $1)", at).await?;
     let read: Time = db.one("select stamp from kinds where test = 'kinds_stamp'").await?;
     Ok(read == at)
 }
@@ -2013,11 +1954,7 @@ async fn a_timestamp_with_no_zone_reads_into_the_time_written() {
 async fn kinds_as_text(db: crate::Pool) -> Result<Vec<string>, Error> {
     let at = Time::from_iso("2026-10-07T12:00:00.5Z")?;
     let uid = a_uid()?;
-    let _added = if pg() {
-        db.run("insert into kinds (test, id, at, uid) values ('kinds_as_text', 1, $1, $2)", at, uid).await?
-    } else {
-        db.run("insert into kinds (test, id, at, uid) values ('kinds_as_text', 1, ?, ?)", at, uid).await?
-    };
+    let _added = db.run("insert into kinds (test, id, at, uid) values ('kinds_as_text', 1, $1, $2)", at, uid).await?;
     let at_text: string = db.one("select at from kinds where test = 'kinds_as_text'").await?;
     let uid_text: string = db.one("select uid from kinds where test = 'kinds_as_text'").await?;
     Ok(vec![at_text, uid_text])
@@ -2053,11 +1990,7 @@ async fn a_time_and_a_uuid_read_into_a_string() {
 // them into a `Uuid` and into a `Bytes`.
 async fn sixteen_bytes(db: crate::Pool) -> Result<bool, Error> {
     let bytes = Bytes::from_base64("AZLwxHo+e1ydHi86S1xtfg==")?;
-    let _added = if pg() {
-        db.run("insert into kinds (test, id, data) values ('kinds_16', 1, $1)", bytes).await?
-    } else {
-        db.run("insert into kinds (test, id, data) values ('kinds_16', 1, ?)", bytes).await?
-    };
+    let _added = db.run("insert into kinds (test, id, data) values ('kinds_16', 1, $1)", bytes).await?;
     let uid: Uuid = db.one("select data from kinds where test = 'kinds_16'").await?;
     if uid != a_uid()? {
         return Err(Error::new("the id read from 16 bytes differs"));
@@ -2202,6 +2135,351 @@ async fn a_mysql_zero_date_is_an_error_naming_the_column() {
             match maybe {
                 Ok(_) => assert(false),
                 Err(e) => assert_eq(e.message(), "column `at` cannot be decoded"),
+            }
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+// Placeholders. A query written with `$1`, `$2`, ... runs on every
+// database: SQLite reads them itself, and on MySQL each becomes a `?`,
+// with the values sent in the order the placeholders appear.
+
+fn mysql() -> bool {
+    url().starts_with("mysql")
+}
+
+// `$n` in order, out of order, one used twice, and out of order with a
+// repeat (`$2 ... $1 ... $2`), on every database.
+#[test]
+async fn dollar_placeholders_bind_in_order_out_of_order_and_repeated() {
+    let opened: Result<crate::Pool, Error> = ready("dollar_order").await;
+    match opened {
+        Ok(db) => {
+            let first: Result<u64, Error> = db.run("insert into users (test, id, name, age) values ($1, $2, $3, $4)", "dollar_order", 1, "Ada", 36).await;
+            match first {
+                Ok(n) => assert_eq(n, 1),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            let second: Result<u64, Error> = db.run("insert into users (test, id, name, age) values ($2, $1, $4, $3)", 2, "dollar_order", 41, "Alan").await;
+            match second {
+                Ok(n) => assert_eq(n, 1),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            let both: Result<Vec<User>, Error> = db.all("select id, name, age from users where test = $1 order by id", "dollar_order").await;
+            match both {
+                Ok(users) => {
+                    assert_eq(users.len(), 2);
+                    assert_eq(users[0].id, 1);
+                    assert_eq(users[0].name, "Ada");
+                    assert(users[0].age == Some(36));
+                    assert_eq(users[1].id, 2);
+                    assert_eq(users[1].name, "Alan");
+                    assert(users[1].age == Some(41));
+                }
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            let twice: Result<Vec<User>, Error> = db.all("select id, name, age from users where test = $1 and (id = $2 or age = $2) order by id", "dollar_order", 41).await;
+            match twice {
+                Ok(users) => {
+                    assert_eq(users.len(), 1);
+                    assert_eq(users[0].name, "Alan");
+                }
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            let repeated: Result<Option<User>, Error> = db.first("select id, name, age from users where age > $2 and test = $1 and id > $2", "dollar_order", 1).await;
+            match repeated {
+                Ok(Some(u)) => assert_eq(u.name, "Alan"),
+                Ok(None) => assert(false),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+// The string `read` holds, or its `Error`'s message.
+fn text_or_message(read: Result<string, Error>) -> string {
+    match read {
+        Ok(text) => text.clone(),
+        Err(e) => e.message().clone(),
+    }
+}
+
+// The integer `read` holds, or -1 for an `Error`.
+fn number_or_minus_one(read: Result<i64, Error>) -> i64 {
+    match read {
+        Ok(n) => n,
+        Err(_) => -1,
+    }
+}
+
+// A `$1` inside a string, a doubled-quote string, each kind of quoted
+// name, and each kind of comment of the database is text, so these
+// queries take no values.
+#[test]
+async fn a_dollar_in_quotes_names_and_comments_is_text() {
+    let opened: Result<crate::Pool, Error> = crate::connect_with(url(), 1).await;
+    match opened {
+        Ok(db) => {
+            let text: Result<string, Error> = db.one("select '$1'").await;
+            assert_eq(text_or_message(text), "$1");
+            let text: Result<string, Error> = db.one("select 'it''s $1'").await;
+            assert_eq(text_or_message(text), "it's $1");
+            let number: Result<i64, Error> = db.one("select 1 /* $1 */").await;
+            assert_eq(number_or_minus_one(number), 1);
+            let number: Result<i64, Error> = db.one("select 1 -- $1\n").await;
+            assert_eq(number_or_minus_one(number), 1);
+            let number: Result<i64, Error> = db.one("select 1 as price$1").await;
+            assert_eq(number_or_minus_one(number), 1);
+            if pg() {
+                let number: Result<i64, Error> = db.one("select 1 as \"$1\"").await;
+                assert_eq(number_or_minus_one(number), 1);
+            } else if mysql() {
+                let number: Result<i64, Error> = db.one("select 1 as `$1`").await;
+                assert_eq(number_or_minus_one(number), 1);
+                let text: Result<string, Error> = db.one("select \"$1\"").await;
+                assert_eq(text_or_message(text), "$1");
+                let text: Result<string, Error> = db.one("select \"it\"\"s $1\"").await;
+                assert_eq(text_or_message(text), "it\"s $1");
+                let text: Result<string, Error> = db.one("select 'it\\'s $1'").await;
+                assert_eq(text_or_message(text), "it's $1");
+                let number: Result<i64, Error> = db.one("select 1 # $1").await;
+                assert_eq(number_or_minus_one(number), 1);
+            } else {
+                let number: Result<i64, Error> = db.one("select 1 as \"$1\"").await;
+                assert_eq(number_or_minus_one(number), 1);
+                let number: Result<i64, Error> = db.one("select 1 as `$1`").await;
+                assert_eq(number_or_minus_one(number), 1);
+                let number: Result<i64, Error> = db.one("select 1 as [$1]").await;
+                assert_eq(number_or_minus_one(number), 1);
+            }
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+// On SQLite a backslash escapes nothing, so `'a\'` ends there and the
+// `$1` after it is a placeholder; on MySQL `--` with no space after it is
+// two minus signs, so `5--$1` is a subtraction and the `$1` a placeholder.
+#[test]
+async fn each_database_reads_its_own_quotes_and_comments() {
+    if pg() {
+        return;
+    }
+    let opened: Result<crate::Pool, Error> = crate::connect_with(url(), 1).await;
+    match opened {
+        Ok(db) => {
+            if mysql() {
+                let read: Result<i64, Error> = db.one("select cast(5--$1 as signed)", 2).await;
+                match read {
+                    Ok(n) => assert_eq(n, 7),
+                    Err(e) => assert_eq(e.message(), "no error"),
+                }
+            } else {
+                let read: Result<string, Error> = db.one("select 'a\\' || $1", "b").await;
+                match read {
+                    Ok(text) => assert_eq(text, "a\\b"),
+                    Err(e) => assert_eq(e.message(), "no error"),
+                }
+            }
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+struct Marked {
+    mark: string,
+    name: string,
+}
+
+// A `?` in a string beside a `$1` is text, not a second kind of
+// placeholder.
+#[test]
+async fn a_question_mark_in_a_string_beside_a_dollar_is_text() {
+    let opened: Result<crate::Pool, Error> = ready("question_text").await;
+    match opened {
+        Ok(db) => {
+            let added: Result<u64, Error> = db.run("insert into users (test, id, name) values ('question_text', 1, 'Ada')").await;
+            assert(added.is_ok());
+            let read: Result<Marked, Error> = db.one("select '?' as mark, name from users where test = 'question_text' and name = $1", "Ada").await;
+            match read {
+                Ok(m) => {
+                    assert_eq(m.mark, "?");
+                    assert_eq(m.name, "Ada");
+                }
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+// The message of `result`'s `Error`, or "no error".
+fn refusal(result: Result<u64, Error>) -> string {
+    match result {
+        Ok(_) => "no error",
+        Err(e) => e.message().clone(),
+    }
+}
+
+// On SQLite and MySQL, both kinds of placeholder in one query, `$0`, a
+// number too large, too many or too few values, and a skipped number are
+// each an `Error` before the query is sent. On Postgres the server's own
+// rules apply.
+#[test]
+async fn dollar_placeholders_are_checked_before_the_query_is_sent() {
+    if pg() {
+        return;
+    }
+    let opened: Result<crate::Pool, Error> = crate::connect_with(url(), 1).await;
+    match opened {
+        Ok(db) => {
+            let mixed: Result<u64, Error> = db.run("select ?, $1", 1).await;
+            assert_eq(refusal(mixed), "use `$1`, `$2`, … or `?`, not both");
+            let zero: Result<u64, Error> = db.run("select $0").await;
+            assert_eq(refusal(zero), "`$0` is not a placeholder; they start at `$1`");
+            let large: Result<u64, Error> = db.run("select $99999999999999999999", 1).await;
+            assert_eq(refusal(large), "`$` followed by a number too large to be a placeholder");
+            let many: Result<u64, Error> = db.run("select $1", 1, 2).await;
+            assert_eq(refusal(many), "the query uses `$1` but was given 2 values");
+            let few: Result<u64, Error> = db.run("select $1, $2", 1).await;
+            assert_eq(refusal(few), "the query uses `$1` to `$2` but was given 1 value");
+            let beyond: Result<u64, Error> = db.run("select $1, $3", 1, 2).await;
+            assert_eq(refusal(beyond), "the query uses `$1` to `$3` but was given 2 values");
+            let skipped: Result<u64, Error> = db.run("select $1, $3", 1, 2, 3).await;
+            assert_eq(refusal(skipped), "the query skips `$2`");
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+// Where the database reads the placeholders differently from the
+// package, the count check catches it and says where to look: SQLite
+// reads `$1::text` as a name of its own, and MySQL runs the text of a
+// `/*! */` comment.
+#[test]
+async fn a_placeholder_the_database_reads_differently_fails_the_count_check() {
+    if pg() {
+        return;
+    }
+    let opened: Result<crate::Pool, Error> = crate::connect_with(url(), 1).await;
+    match opened {
+        Ok(db) => {
+            let read: Result<u64, Error> = if mysql() {
+                db.run("select $1 /*! + ? */", 1).await
+            } else {
+                db.run("select $1::text, $1", 1).await
+            };
+            assert_eq(refusal(read), "the query has 2 placeholders but was given 1 value; the database read the placeholders differently from varyk-sql; look for `$1::text` or one `$n` in two statements (SQLite), or a `/*! */` comment (MySQL)");
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+// A `?` query with a `$` in a string, a JSON path, works on SQLite and
+// MySQL, and its count check gives 0.1's message with no note.
+#[test]
+async fn a_question_mark_query_with_a_dollar_in_a_string_works() {
+    if pg() {
+        return;
+    }
+    let opened: Result<crate::Pool, Error> = ready("json_path").await;
+    match opened {
+        Ok(db) => {
+            let added: Result<u64, Error> = db.run("insert into users (test, id, name) values ('json_path', 1, 'Ada')").await;
+            assert(added.is_ok());
+            let read: Result<Marked, Error> = db.one("select '$.a' as mark, name from users where test = 'json_path' and name = ?", "Ada").await;
+            match read {
+                Ok(m) => {
+                    assert_eq(m.mark, "$.a");
+                    assert_eq(m.name, "Ada");
+                }
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            let many: Result<u64, Error> = db.run("delete from users where test = 'json_path' and name <> '$.a' and id = ?", 1, 2).await;
+            assert_eq(refusal(many), "the query has 1 placeholder but was given 2 values");
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+// On Postgres the text is not scanned, so `?` is jsonb's operator beside
+// a `$1`.
+#[test]
+async fn a_postgres_jsonb_question_mark_is_an_operator() {
+    if !pg() {
+        return;
+    }
+    let opened: Result<crate::Pool, Error> = crate::connect_with(url(), 1).await;
+    match opened {
+        Ok(db) => {
+            let read: Result<bool, Error> = db.one("select $1::jsonb ? 'a'", "{\"a\": 1}").await;
+            match read {
+                Ok(has) => assert(has),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+// A quote or a `/*` comment that never closes, in a query holding a `$`,
+// is an `Error` before the query is sent, on SQLite and MySQL.
+#[test]
+async fn an_unclosed_quote_or_comment_is_an_error() {
+    if pg() {
+        return;
+    }
+    let opened: Result<crate::Pool, Error> = crate::connect_with(url(), 1).await;
+    match opened {
+        Ok(db) => {
+            let quote: Result<u64, Error> = db.run("select $1, 'abc", 1).await;
+            assert_eq(refusal(quote), "the query has a quote that never closes");
+            let comment: Result<u64, Error> = db.run("select $1 /* note", 1).await;
+            assert_eq(refusal(comment), "the query has a comment that never closes");
+        }
+        Err(e) => assert_eq(e.message(), "no error"),
+    }
+}
+
+// Runs `$1` queries in a transaction; off Postgres it first handles a
+// check `Error` and a scanner `Error`, which leave the transaction as it
+// was, and then commits.
+async fn dollars_in_a_tx(db: crate::Pool) -> Result<bool, Error> {
+    let mut tx = db.begin().await?;
+    if !pg() {
+        let checked: Result<u64, Error> = tx.run("insert into users (test, id, name) values ($1, $3, 'Ada')", "tx_dollars", 2).await;
+        if refusal(checked) != "the query uses `$1` to `$3` but was given 2 values" {
+            return Err(Error::new("the skipped number was not refused"));
+        }
+        let scanned: Result<u64, Error> = tx.run("insert into users (test, id, name) values ($1, 1, 'Ada)", "tx_dollars").await;
+        if refusal(scanned) != "the query has a quote that never closes" {
+            return Err(Error::new("the unclosed quote was not refused"));
+        }
+    }
+    let _added = tx.run("insert into users (test, id, name) values ($2, $1, $3)", 1, "tx_dollars", "Ada").await?;
+    let read: User = tx.one("select id, name, age from users where test = $1 and id = $2", "tx_dollars", 1).await?;
+    if read.name != "Ada" {
+        return Err(Error::new("the row read back differs"));
+    }
+    tx.commit().await
+}
+
+#[test]
+async fn dollar_placeholders_work_in_a_transaction_and_their_errors_leave_it_usable() {
+    let opened: Result<crate::Pool, Error> = ready("tx_dollars").await;
+    match opened {
+        Ok(db) => {
+            let committed: Result<bool, Error> = dollars_in_a_tx(db).await;
+            match committed {
+                Ok(done) => assert(done),
+                Err(e) => assert_eq(e.message(), "no error"),
+            }
+            let rows: Result<i64, Error> = db.one("select count(*) from users where test = 'tx_dollars'").await;
+            match rows {
+                Ok(n) => assert_eq(n, 1),
+                Err(e) => assert_eq(e.message(), "no error"),
             }
         }
         Err(e) => assert_eq(e.message(), "no error"),

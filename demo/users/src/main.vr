@@ -16,7 +16,7 @@ async fn load() -> Result<Vec<User>, Error> {
     let config: Config = env::parse()?;
     let db = sql::connect(config.database_url).await?;
     db.migrate("migrations").await?;
-    db.run("insert into users (name, created_at) values (?, ?)", "Ada", Time::now()).await?;
+    db.run("insert into users (name, created_at) values ($1, $2)", "Ada", Time::now()).await?;
     db.all("select id, name, created_at from users").await
 }
 

@@ -4,9 +4,9 @@ The official SQL package for [Varyk](https://varyk.com), a language
 for backend services that compiles to Rust: SQLite, Postgres, and MySQL
 through sqlx.
 
-varyk-sql is on [crates.io](https://crates.io/crates/varyk-sql): 0.3
-works with varyk 0.8, 0.2 with varyk 0.7, and 0.1 with varyk 0.6 (see
-[Versions](#versions)). Varyk is experimental and pre-1.0: anything
+varyk-sql is on [crates.io](https://crates.io/crates/varyk-sql): 0.4
+and 0.3 work with varyk 0.8, 0.2 with varyk 0.7, and 0.1 with varyk 0.6
+(see [Versions](#versions)). Varyk is experimental and pre-1.0: anything
 here may change.
 
 The package covers what an ordinary service does with a database and
@@ -24,7 +24,7 @@ varyk add sql
 ```
 
 `varyk add sql` runs `cargo add varyk-sql --rename sql`, so the
-manifest gets `sql = { version = "0.3.0", package = "varyk-sql" }` and
+manifest gets `sql = { version = "0.4.0", package = "varyk-sql" }` and
 code names the package `sql::`. The default driver is SQLite, compiled
 from its C source on the first build: that needs a C compiler (Xcode's
 command-line tools on macOS, `build-essential` on Debian and Ubuntu)
@@ -55,7 +55,7 @@ async fn load() -> Result<Vec<User>, Error> {
     let config: Config = env::parse()?;
     let db = sql::connect(config.database_url).await?;
     db.migrate("migrations").await?;
-    db.run("insert into users (name, created_at) values (?, ?)", "Ada", Time::now()).await?;
+    db.run("insert into users (name, created_at) values ($1, $2)", "Ada", Time::now()).await?;
     db.all("select id, name, created_at from users").await
 }
 
@@ -100,8 +100,8 @@ DATABASE_URL=sqlite::memory:
 writes a `Time`: `1 Ada 2026-10-07T12:00:00.123456Z`. `main` returns
 nothing in Varyk, so the work is in `load`, and `main` matches on its
 result; `all` takes its row type from `load`'s return type. The same
-program is in [`demo/users`](demo/users). The query's `?` is SQLite's
-and MySQL's placeholder; Postgres's is `$1` (see [Queries](#queries)).
+program is in [`demo/users`](demo/users). The query's `$1` and `$2`
+are placeholders on every database (see [Queries](#queries)).
 
 ## Configuration
 
@@ -225,17 +225,28 @@ it, one per placeholder: `bool`, `string`, floats, integers up to
 into.
 
 ```varyk
-let user: Option<User> = db.first("select id, name from users where id = ?", id).await?;
+let user: Option<User> = db.first("select id, name from users where id = $1", id).await?;
 ```
 
-The placeholders are the database's own: `?` on SQLite and MySQL, `$1`,
-`$2` on Postgres. A program that runs on two databases keeps two
-queries and picks one with an `if`.
+The placeholders are `$1`, `$2`, and so on, on every database. `$2`
+may come before `$1`, and `$1` may be written twice; it takes the same
+value each time. SQLite and MySQL also take `?`, one per value in order, as
+before. A `$` inside a string, a quoted name, or a comment is text, not
+a placeholder. On MySQL the package reads quotes by the server's default
+rules: if the server's `sql_mode` has `NO_BACKSLASH_ESCAPES` or
+`ANSI_QUOTES`, keep `?`, `$`, and backslashes out of the quoted text of a
+query that uses `$1`, or write it with `?`.
 
 - On SQLite and MySQL the number of values is checked against the
   number of placeholders before the query runs, and a mismatch is an
-  `Error` naming both. On Postgres the server rejects too few values
-  and ignores an extra one.
+  `Error` naming both. So is a query that mixes `?` and `$1`,
+  numbers its placeholders other than `$1` up to the number of values, each used, or,
+  when it holds a `$`, has a quote or comment that never closes. On Postgres the server
+  rejects too few values and ignores an extra one.
+- A `::` cast is Postgres's own syntax. The optional filter `where
+  ($1::text is null or name = $1)` runs only there, so a program that
+  runs on two databases picks it with an `if`; `where ($1 is null or
+  name = $1)`, with no cast, runs on SQLite and MySQL.
 - On Postgres a `None` is a `NULL` with no type, which takes its type
   from where the parameter is first used: in `set done = $1` and in
   `where done = $1` it takes the type of `done`, with no cast. Where
@@ -258,7 +269,7 @@ statement that reads what an earlier one left on its connection does
 not work on a pool. Read a new row's id in the statement that makes it:
 
 ```varyk
-// Postgres; SQLite takes `$1` as well as `?`
+// Postgres and SQLite; `$1` runs on every database, but MySQL has no `returning`
 let id: i64 = db.one("insert into users (name, created_at) values ($1, $2) returning id", name, Time::now()).await?;
 ```
 
@@ -388,8 +399,9 @@ it failed". To try again, start a new transaction. The rule is the same
 on all three databases: Postgres aborts the transaction at the failure,
 and a MySQL deadlock and some SQLite errors end it on the server. An
 `Error` from reading the rows into `T` does not end the transaction,
-nor does the package's own count of values on SQLite and MySQL; on
-Postgres too few values is a database error and does. After `commit`
+nor do the package's own placeholder checks (the count, the numbering,
+and the scanner's) on SQLite and MySQL; on Postgres too few values is a
+database error and does. After `commit`
 the transaction is finished, as after any other.
 
 ## Errors
@@ -418,12 +430,12 @@ insert gives
 ```text
 2026-10-07T08:02:34.865Z DEBUG summary=insert into users (name, … db.statement=
 
-insert into users (name, created_at) values (?, ?)
+insert into users (name, created_at) values ($1, $2)
  rows_affected=1 rows_returned=0 elapsed=14.334µs elapsed_secs=1.4334e-5
 ```
 
-with the `?`s as written and the values, `"Ada"` and the time, nowhere
-in the log.
+with the text as sent (on MySQL, `$1` and `$2` rewritten to `?`s) and the
+values, `"Ada"` and the time, nowhere in the log.
 
 ## Health check
 
@@ -471,6 +483,7 @@ followed by a varyk-sql release.
 
 | varyk-sql | varyk |
 |---|---|
+| 0.4 | 0.8 |
 | 0.3 | 0.8 |
 | 0.2 | 0.7 |
 | 0.1 | 0.6 |

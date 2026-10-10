@@ -3,7 +3,9 @@
 // `Result` is mapped to a `varyk_std::Error` whose message names no URL
 // and no database "detail" field, and nothing here panics.
 
+use std::borrow::Cow;
 use std::fmt;
+use std::ops::Range;
 use std::path::Path;
 use std::pin::Pin;
 
@@ -441,7 +443,7 @@ async fn one_on<DB: Driver, T: DeserializeOwned>(
 ) -> Result<T, varyk_std::Error>
 where
     for<'c> &'c mut DB::Connection: Executor<'c, Database = DB>,
-    DB::Arguments<'static>: IntoArguments<'static, DB>,
+    for<'q> DB::Arguments<'q>: IntoArguments<'q, DB>,
 {
     match first_on::<DB, T>(conn, failed, query, values).await? {
         Some(found) => Ok(found),
@@ -458,9 +460,18 @@ async fn first_on<DB: Driver, T: DeserializeOwned>(
 ) -> Result<Option<T>, varyk_std::Error>
 where
     for<'c> &'c mut DB::Connection: Executor<'c, Database = DB>,
-    DB::Arguments<'static>: IntoArguments<'static, DB>,
+    for<'q> DB::Arguments<'q>: IntoArguments<'q, DB>,
 {
-    let bound = bind(conn, failed, query, values).await?;
+    let query = to_send::<DB>(query, values)?;
+    let bound = bind(
+        conn,
+        failed,
+        &query.text,
+        query.values,
+        query.given,
+        query.dollars,
+    )
+    .await?;
     let row = if DB::READS_TO_END {
         // sqlx's `fetch_optional` on Postgres and MySQL stops at the first
         // row and leaves the rest unread, so a statement that fails on a
@@ -508,9 +519,18 @@ async fn all_on<DB: Driver, T: DeserializeOwned>(
 ) -> Result<Vec<T>, varyk_std::Error>
 where
     for<'c> &'c mut DB::Connection: Executor<'c, Database = DB>,
-    DB::Arguments<'static>: IntoArguments<'static, DB>,
+    for<'q> DB::Arguments<'q>: IntoArguments<'q, DB>,
 {
-    let bound = bind(conn, failed, query, values).await?;
+    let query = to_send::<DB>(query, values)?;
+    let bound = bind(
+        conn,
+        failed,
+        &query.text,
+        query.values,
+        query.given,
+        query.dollars,
+    )
+    .await?;
     let rows = bound
         .fetch_all(&mut *conn)
         .await
@@ -527,9 +547,18 @@ async fn run_on<DB: Driver>(
 ) -> Result<u64, varyk_std::Error>
 where
     for<'c> &'c mut DB::Connection: Executor<'c, Database = DB>,
-    DB::Arguments<'static>: IntoArguments<'static, DB>,
+    for<'q> DB::Arguments<'q>: IntoArguments<'q, DB>,
 {
-    let bound = bind(conn, failed, query, values).await?;
+    let query = to_send::<DB>(query, values)?;
+    let bound = bind(
+        conn,
+        failed,
+        &query.text,
+        query.values,
+        query.given,
+        query.dollars,
+    )
+    .await?;
     let done = bound
         .execute(&mut *conn)
         .await
@@ -537,10 +566,98 @@ where
     Ok(DB::rows_affected(&done))
 }
 
-/// `query` with `values` bound to its placeholders, in order. On SQLite
+/// A query as it is sent: its text, the values bound to it in order,
+/// the number of values the caller gave, and whether the text held a
+/// `$n`.
+struct Sendable {
+    text: Cow<'static, str>,
+    values: Vec<varyk_std::Value>,
+    given: usize,
+    dollars: bool,
+}
+
+/// `query` and `values` as they are sent. On SQLite and MySQL a query
+/// whose text holds a `$` is first scanned and its placeholders checked,
+/// an `Error` before anything is sent; on MySQL each `$n` then becomes a
+/// `?`, and the values go in the order the placeholders appear, a value
+/// used twice sent twice. A query with no `$`, and every query on
+/// Postgres, goes as given.
+fn to_send<DB: Driver>(
+    query: &'static str,
+    values: Vec<varyk_std::Value>,
+) -> Result<Sendable, varyk_std::Error> {
+    let given = values.len();
+    if !DB::COUNTS_PLACEHOLDERS || !query.contains('$') {
+        return Ok(Sendable {
+            text: Cow::Borrowed(query),
+            values,
+            given,
+            dollars: false,
+        });
+    }
+    let found = scan_placeholders(query, DB::REWRITES_DOLLARS)?;
+    check_placeholders(&found, given)?;
+    let dollars = !found.dollars.is_empty();
+    if !DB::REWRITES_DOLLARS || !dollars {
+        return Ok(Sendable {
+            text: Cow::Borrowed(query),
+            values,
+            given,
+            dollars,
+        });
+    }
+    // The checks have made every number name one of the values, and each
+    // `$n` is ASCII, so its bytes are a slice of the text: an `Error`
+    // here would be a bug in the scanner.
+    let unplaced =
+        || varyk_std::Error::new("varyk-sql could not place the query's values".to_string());
+    let mut slots: Vec<Option<varyk_std::Value>> = values.into_iter().map(Some).collect();
+    let mut text = String::with_capacity(query.len());
+    let mut sent = Vec::with_capacity(found.dollars.len());
+    let mut from = 0;
+    for (k, dollar) in found.dollars.iter().enumerate() {
+        // A value used again later is copied; its last use takes it.
+        let again = found
+            .dollars
+            .iter()
+            .skip(k + 1)
+            .any(|later| later.number == dollar.number);
+        let slot = dollar
+            .number
+            .and_then(|n| n.checked_sub(1))
+            .and_then(|index| slots.get_mut(index));
+        let value = match slot {
+            Some(slot) if again => slot.clone(),
+            Some(slot) => slot.take(),
+            None => None,
+        };
+        match (query.get(from..dollar.at.start), value) {
+            (Some(before), Some(value)) => {
+                text.push_str(before);
+                text.push('?');
+                sent.push(value);
+            }
+            _ => return Err(unplaced()),
+        }
+        from = dollar.at.end;
+    }
+    text.push_str(query.get(from..).ok_or_else(unplaced)?);
+    Ok(Sendable {
+        text: Cow::Owned(text),
+        values: sent,
+        given,
+        dollars,
+    })
+}
+
+/// `text` with `values` bound to its placeholders, in order. On SQLite
 /// and MySQL the number of values is first checked against the number
 /// of placeholders the prepared statement reports, since SQLite would
-/// bind a missing value as `NULL` and ignore an extra one. Postgres
+/// bind a missing value as `NULL` and ignore an extra one. The `Error`
+/// names `given`, the number of values the caller gave, which on MySQL
+/// can differ from the number bound; when the text held a `$n`, a
+/// difference means the database read its placeholders differently from
+/// `scan_placeholders`, and the message says where to look. Postgres
 /// rejects too few values itself and ignores an extra one, so a
 /// Postgres statement is not prepared here.
 ///
@@ -552,32 +669,39 @@ where
 /// column, so a statement first run with one value would take a later
 /// value's bytes as that first type. Each Postgres run is therefore
 /// parsed again with its own values' types.
-async fn bind<DB: Driver>(
+async fn bind<'q, DB: Driver>(
     conn: &mut DB::Connection,
     failed: &mut bool,
-    query: &'static str,
+    text: &'q str,
     values: Vec<varyk_std::Value>,
-) -> Result<Bound<'static, DB>, varyk_std::Error>
+    given: usize,
+    dollars: bool,
+) -> Result<Bound<'q, DB>, varyk_std::Error>
 where
     for<'c> &'c mut DB::Connection: Executor<'c, Database = DB>,
 {
     if DB::COUNTS_PLACEHOLDERS {
         let placeholders = (&mut *conn)
-            .prepare(query)
+            .prepare(text)
             .await
             .map(|statement| placeholder_count(&statement))
             .map_err(|e| statement_error(e, failed))?;
         if let Some(placeholders) = placeholders {
             if placeholders != values.len() {
+                let note = if dollars {
+                    "; the database read the placeholders differently from varyk-sql; look for `$1::text` or one `$n` in two statements (SQLite), or a `/*! */` comment (MySQL)"
+                } else {
+                    ""
+                };
                 return Err(varyk_std::Error::new(format!(
-                    "the query has {} but was given {}",
+                    "the query has {} but was given {}{note}",
                     counted(placeholders, "placeholder", "placeholders"),
-                    counted(values.len(), "value", "values"),
+                    counted(given, "value", "values"),
                 )));
             }
         }
     }
-    let mut bound = sqlx::query::<DB>(query).persistent(DB::COUNTS_PLACEHOLDERS);
+    let mut bound = sqlx::query::<DB>(text).persistent(DB::COUNTS_PLACEHOLDERS);
     for value in values {
         bound = DB::bind_value(bound, value)?;
     }
@@ -595,7 +719,7 @@ fn placeholder_count<'q, S: Statement<'q>>(statement: &S) -> Option<usize> {
 
 /// `db_error` for a statement the database prepared or ran, setting
 /// `failed` when the database refused it, on every database alike. A
-/// row that cannot be read and the package's own placeholder check (on
+/// row that cannot be read and the package's own placeholder checks (on
 /// SQLite and MySQL) leave the transaction as it was, so they do not.
 fn statement_error(e: sqlx::Error, failed: &mut bool) -> varyk_std::Error {
     if matches!(e, sqlx::Error::Database(_)) {
@@ -613,14 +737,186 @@ fn counted(n: usize, one: &str, many: &str) -> String {
     }
 }
 
+/// The placeholders `scan_placeholders` finds in a query's text: each
+/// `$n`, in the order they appear, and whether a `?` appears.
+struct Placeholders {
+    dollars: Vec<Dollar>,
+    question: bool,
+}
+
+/// One `$n` in a query's text: the bytes it covers, and its number, or
+/// `None` when the number is too large to hold.
+struct Dollar {
+    at: Range<usize>,
+    number: Option<usize>,
+}
+
+/// The `$n` and `?` placeholders of `text`, read by MySQL's rules when
+/// `mysql` is true and SQLite's when it is false. What the database does
+/// not read as SQL is skipped: `'…'` strings and `"…"` quoted text, where
+/// a doubled quote stays inside and, on MySQL only, a backslash escapes
+/// the next character; `` `…` `` quoted names, where a doubled backtick
+/// stays inside, and on SQLite `[…]`; and comments: `--` to the end of
+/// the line (on MySQL only when a space, a control character, or the end
+/// of the text follows it), on MySQL `#` the same way, and `/* … */`.
+/// A `$n` is a `$` and digits with no letter (any non-ASCII character
+/// counts as one), digit, `_`, or `$` on either side, since both
+/// databases allow `$` inside a name. A quote or a `/*` that never closes
+/// is an `Error`, not a guess.
+fn scan_placeholders(text: &str, mysql: bool) -> Result<Placeholders, varyk_std::Error> {
+    let bytes = text.as_bytes();
+    let mut found = Placeholders {
+        dollars: Vec::new(),
+        question: false,
+    };
+    let mut i = 0;
+    while let Some(&b) = bytes.get(i) {
+        let next = bytes.get(i + 1).copied();
+        i = match b {
+            b'\'' | b'"' => quoted(bytes, i, b, mysql)?,
+            b'`' => quoted(bytes, i, b, false)?,
+            b'[' if !mysql => match bytes.iter().skip(i + 1).position(|&c| c == b']') {
+                Some(n) => i + n + 2,
+                None => return Err(never_closes("quote")),
+            },
+            b'-' if next == Some(b'-') && (!mysql || opens_mysql_comment(bytes.get(i + 2))) => {
+                line_end(bytes, i)
+            }
+            b'#' if mysql => line_end(bytes, i),
+            b'/' if next == Some(b'*') => {
+                match bytes.windows(2).skip(i + 2).position(|w| w == b"*/") {
+                    Some(n) => i + n + 4,
+                    None => return Err(never_closes("comment")),
+                }
+            }
+            b'?' => {
+                found.question = true;
+                i + 1
+            }
+            b'$' => {
+                let digits = bytes
+                    .iter()
+                    .skip(i + 1)
+                    .take_while(|c| c.is_ascii_digit())
+                    .count();
+                let end = i + 1 + digits;
+                let before = i.checked_sub(1).and_then(|j| bytes.get(j));
+                if digits > 0 && !in_name(before) && !in_name(bytes.get(end)) {
+                    let number = text.get(i + 1..end).and_then(|n| n.parse::<usize>().ok());
+                    found.dollars.push(Dollar { at: i..end, number });
+                    end
+                } else {
+                    i + 1
+                }
+            }
+            _ => i + 1,
+        };
+    }
+    Ok(found)
+}
+
+/// The index just past the quote `q` that `bytes[start]` opens, where a
+/// doubled `q` stays inside and, when `backslash`, a backslash escapes
+/// the next byte.
+fn quoted(bytes: &[u8], start: usize, q: u8, backslash: bool) -> Result<usize, varyk_std::Error> {
+    let mut i = start + 1;
+    loop {
+        match bytes.get(i) {
+            None => return Err(never_closes("quote")),
+            Some(&b'\\') if backslash => i += 2,
+            Some(&c) if c == q => {
+                if bytes.get(i + 1) == Some(&q) {
+                    i += 2;
+                } else {
+                    return Ok(i + 1);
+                }
+            }
+            Some(_) => i += 1,
+        }
+    }
+}
+
+/// Whether `--` followed by `after` starts a comment on MySQL: a space, a
+/// control character, or the end of the text.
+fn opens_mysql_comment(after: Option<&u8>) -> bool {
+    after.is_none_or(|&c| c == b' ' || c.is_ascii_control())
+}
+
+/// The index of the end of the line `bytes[start]` is on: its newline, or
+/// the end of the text.
+fn line_end(bytes: &[u8], start: usize) -> usize {
+    match bytes.iter().skip(start).position(|&c| c == b'\n') {
+        Some(n) => start + n,
+        None => bytes.len(),
+    }
+}
+
+/// Whether `c` can be part of a name: a letter (any byte of a non-ASCII
+/// character counts as one), a digit, `_`, or `$`.
+fn in_name(c: Option<&u8>) -> bool {
+    c.is_some_and(|&c| c.is_ascii_alphanumeric() || c == b'_' || c == b'$' || !c.is_ascii())
+}
+
+/// The `Error` for a quote or a comment that never closes.
+fn never_closes(what: &str) -> varyk_std::Error {
+    varyk_std::Error::new(format!("the query has a {what} that never closes"))
+}
+
+/// Whether `found`'s placeholders suit `values` values: a query with no
+/// `$n` passes, left to the count of placeholders the database reports;
+/// one with a `$n` holds no `?` and numbers exactly `$1` to `$k`, each
+/// used at least once, where `k` is `values`. The first that fails gives
+/// the message: mixing, `$0`, a number too large, the highest number,
+/// then a number skipped.
+fn check_placeholders(found: &Placeholders, values: usize) -> Result<(), varyk_std::Error> {
+    if found.dollars.is_empty() {
+        return Ok(());
+    }
+    let fail = |message: String| Err(varyk_std::Error::new(message));
+    if found.question {
+        return fail("use `$1`, `$2`, … or `?`, not both".to_string());
+    }
+    let numbers: Vec<Option<usize>> = found.dollars.iter().map(|d| d.number).collect();
+    if numbers.contains(&Some(0)) {
+        return fail("`$0` is not a placeholder; they start at `$1`".to_string());
+    }
+    if numbers.contains(&None) {
+        return fail("`$` followed by a number too large to be a placeholder".to_string());
+    }
+    let mut numbers: Vec<usize> = numbers.into_iter().flatten().collect();
+    numbers.sort_unstable();
+    numbers.dedup();
+    let highest = numbers.last().copied().unwrap_or(0);
+    if highest != values {
+        let uses = if highest == 1 {
+            "`$1`".to_string()
+        } else {
+            format!("`$1` to `${highest}`")
+        };
+        return fail(format!(
+            "the query uses {uses} but was given {}",
+            counted(values, "value", "values")
+        ));
+    }
+    match (1..).zip(&numbers).find(|&(n, &number)| number != n) {
+        Some((skipped, _)) => fail(format!("the query skips `${skipped}`")),
+        None => Ok(()),
+    }
+}
+
 /// What differs by database: how a value is bound, how a cell is read,
 /// and two facts about the server. Its rows are read by position, and its
 /// statements can be kept prepared.
 trait Driver: Database<Row: ByPosition> + HasStatementCache {
     /// Whether a statement is prepared first to count its placeholders
-    /// and is kept prepared after it runs: true but on Postgres (see
-    /// `bind`).
+    /// and is kept prepared after it runs, and whether a query holding a
+    /// `$` is scanned for its placeholders and checked before it is sent:
+    /// true but on Postgres (see `to_send` and `bind`).
     const COUNTS_PLACEHOLDERS: bool;
+
+    /// Whether each `$n` is rewritten to a `?`, with the values put in the
+    /// order the placeholders appear: true on MySQL only (see `to_send`).
+    const REWRITES_DOLLARS: bool;
 
     /// Whether `first` reads a result to its end: true but on SQLite (see
     /// `first_on`).
@@ -649,6 +945,7 @@ trait Driver: Database<Row: ByPosition> + HasStatementCache {
 #[cfg(feature = "sqlite")]
 impl Driver for sqlx::Sqlite {
     const COUNTS_PLACEHOLDERS: bool = true;
+    const REWRITES_DOLLARS: bool = false;
     const READS_TO_END: bool = false;
 
     fn bind_value<'q>(
@@ -683,6 +980,7 @@ impl Driver for sqlx::Sqlite {
 #[cfg(feature = "postgres")]
 impl Driver for sqlx::Postgres {
     const COUNTS_PLACEHOLDERS: bool = false;
+    const REWRITES_DOLLARS: bool = false;
     const READS_TO_END: bool = true;
 
     fn bind_value<'q>(
@@ -796,6 +1094,7 @@ impl sqlx::Encode<'_, sqlx::Postgres> for UntypedNull {
 #[cfg(feature = "mysql")]
 impl Driver for sqlx::MySql {
     const COUNTS_PLACEHOLDERS: bool = true;
+    const REWRITES_DOLLARS: bool = true;
     const READS_TO_END: bool = true;
 
     fn bind_value<'q>(
@@ -1670,8 +1969,8 @@ fn migrate_error(folder: &str, e: MigrateError) -> varyk_std::Error {
 #[cfg(test)]
 mod tests {
     use super::{
-        Pool, ReadError, Tx, connect, connect_error, connect_with, db_error, in_memory,
-        migrate_error, sqlite_time,
+        Pool, ReadError, Tx, check_placeholders, connect, connect_error, connect_with, db_error,
+        in_memory, migrate_error, scan_placeholders, sqlite_time,
     };
     use serde::de;
     use sqlx::migrate::MigrateError;
@@ -1988,5 +2287,277 @@ mod tests {
             .to_string();
         assert_no_secret(&message);
         assert!(message.contains("`migrations`"), "{message}");
+    }
+
+    /// The numbers of the `$n` placeholders `text` holds, in the order
+    /// they appear, or the scanner's message.
+    fn numbers(text: &str, mysql: bool) -> Result<Vec<Option<usize>>, String> {
+        match scan_placeholders(text, mysql) {
+            Ok(found) => Ok(found.dollars.iter().map(|d| d.number).collect()),
+            Err(e) => Err(e.message().to_string()),
+        }
+    }
+
+    /// The message the checks give `text` (read by SQLite's rules) with
+    /// `values` values, or `None` when they pass.
+    fn checked(text: &str, values: usize) -> Option<String> {
+        match scan_placeholders(text, false).and_then(|found| check_placeholders(&found, values)) {
+            Ok(()) => None,
+            Err(e) => Some(e.message().to_string()),
+        }
+    }
+
+    #[test]
+    fn dollar_placeholders_are_found_with_their_places() {
+        for mysql in [false, true] {
+            let text = "select $1, $12 from t where a = ($1)";
+            let found = scan_placeholders(text, mysql);
+            assert!(found.is_ok(), "{text}");
+            if let Ok(found) = found {
+                assert!(!found.question, "{text}");
+                let places: Vec<(Option<&str>, Option<usize>)> = found
+                    .dollars
+                    .iter()
+                    .map(|d| (text.get(d.at.clone()), d.number))
+                    .collect();
+                assert_eq!(
+                    places,
+                    [
+                        (Some("$1"), Some(1)),
+                        (Some("$12"), Some(12)),
+                        (Some("$1"), Some(1))
+                    ]
+                );
+            }
+        }
+    }
+
+    /// A `$n`'s range is in bytes, so after text outside ASCII it still
+    /// slices the `$n` out of the text, as the MySQL rewrite needs.
+    #[test]
+    fn a_dollar_after_non_ascii_text_keeps_its_place() {
+        for mysql in [false, true] {
+            let text = "select 'é', $1";
+            let found = scan_placeholders(text, mysql);
+            assert!(found.is_ok(), "{text}");
+            if let Ok(found) = found {
+                let places: Vec<Option<&str>> = found
+                    .dollars
+                    .iter()
+                    .map(|d| text.get(d.at.clone()))
+                    .collect();
+                assert_eq!(places, [Some("$1")]);
+            }
+        }
+    }
+
+    #[test]
+    fn text_with_nothing_to_find_scans_clean() {
+        for mysql in [false, true] {
+            for text in [
+                "",
+                "$",
+                "select $",
+                "select 1 -",
+                "select 1 /",
+                "select $x",
+                "-",
+                "/",
+            ] {
+                assert_eq!(numbers(text, mysql), Ok(vec![]), "{text}");
+            }
+        }
+    }
+
+    /// A `$1` inside each kind of quote, quoted name, and comment is text,
+    /// and so is a `?` there.
+    #[test]
+    fn quotes_names_and_comments_hold_text_on_sqlite() {
+        for text in [
+            "select '$1'",
+            "select \"$1\"",
+            "select `$1`",
+            "select [$1]",
+            "select 'it''s $1'",
+            "select \"a\"\"$1\"",
+            "select `a``$1`",
+            "select 1 -- $1",
+            "select 1 --$1",
+            "select 5--$1",
+            "select 1 /* $1 */",
+            "select 1 /* /* $1 */",
+            "select 1 /*$1*/",
+            "select '?'",
+            "select 1 -- ?",
+            "select 1 /* ? */",
+            "select [?]",
+        ] {
+            let found = scan_placeholders(text, false);
+            assert!(
+                matches!(&found, Ok(found) if found.dollars.is_empty() && !found.question),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn quotes_names_and_comments_hold_text_on_mysql() {
+        for text in [
+            "select '$1'",
+            "select \"$1\"",
+            "select `$1`",
+            "select 'it''s $1'",
+            "select 'it\\'s $1'",
+            "select \"a\\\"$1\"",
+            "select \"a\"\"$1\"",
+            "select `a``$1`",
+            "select 1 -- $1",
+            "select 1 --\t$1",
+            "select 1 --\r$1",
+            "select 1 --",
+            "select 1 #$1",
+            "select 1 /* $1 */",
+            "select 1 /* /* $1 */",
+            "select '?'",
+            "select 1 # ?",
+            "select 1 /* ? */",
+        ] {
+            let found = scan_placeholders(text, true);
+            assert!(
+                matches!(&found, Ok(found) if found.dollars.is_empty() && !found.question),
+                "{text}"
+            );
+        }
+    }
+
+    /// What one database reads as quoted text or a comment, the other
+    /// reads as SQL.
+    #[test]
+    fn each_database_keeps_its_own_rules() {
+        // A backslash escapes nothing on SQLite, and in backticks on MySQL.
+        assert_eq!(numbers("select 'a\\', $1", false), Ok(vec![Some(1)]));
+        assert_eq!(numbers("select `a\\`, $1", true), Ok(vec![Some(1)]));
+        // `--` needs a space or a control character after it on MySQL.
+        assert_eq!(numbers("select 5--$1", true), Ok(vec![Some(1)]));
+        assert_eq!(numbers("select 5--$1", false), Ok(vec![]));
+        // `#` and `[` are not quoting on SQLite and MySQL respectively.
+        assert_eq!(numbers("select 1 #$1", false), Ok(vec![Some(1)]));
+        assert_eq!(numbers("select [$1]", true), Ok(vec![Some(1)]));
+        // A line comment ends at the end of its line.
+        assert_eq!(numbers("select 1 -- a\n, $1", false), Ok(vec![Some(1)]));
+        assert_eq!(numbers("select 1 # a\n, $1", true), Ok(vec![Some(1)]));
+        assert_eq!(numbers("select 1 /* a */ $1", true), Ok(vec![Some(1)]));
+        assert_eq!(numbers("select 'a'$1", false), Ok(vec![Some(1)]));
+    }
+
+    /// A `$` inside a name, or digits running into a name, is no
+    /// placeholder.
+    #[test]
+    fn a_dollar_inside_a_name_is_no_placeholder() {
+        for mysql in [false, true] {
+            for text in [
+                "select price$1",
+                "select $1$x",
+                "select é$1",
+                "select $1a",
+                "select $1_",
+                "select _$1",
+                "select 1$1",
+                "select $$1",
+                "select $1é",
+            ] {
+                assert_eq!(numbers(text, mysql), Ok(vec![]), "{text}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_quote_or_comment_that_never_closes_is_an_error() {
+        let quote = "the query has a quote that never closes";
+        let comment = "the query has a comment that never closes";
+        for mysql in [false, true] {
+            for (text, message) in [
+                ("select 'a", quote),
+                ("select 'a''", quote),
+                ("select \"a", quote),
+                ("select `a", quote),
+                ("select `a``", quote),
+                ("select '", quote),
+                ("select 1 /* a", comment),
+                ("select 1 /*/", comment),
+                ("select 1 /* $1 *", comment),
+                ("/*", comment),
+            ] {
+                assert_eq!(numbers(text, mysql), Err(message.to_string()), "{text}");
+            }
+        }
+        assert_eq!(numbers("select [a", false), Err(quote.to_string()));
+        assert_eq!(numbers("select 'a\\'", true), Err(quote.to_string()));
+        assert_eq!(numbers("select 'a\\", true), Err(quote.to_string()));
+        assert_eq!(numbers("select 'a\\', $1", true), Err(quote.to_string()));
+    }
+
+    #[test]
+    fn a_number_too_large_is_found_without_one() {
+        assert_eq!(
+            numbers("select $99999999999999999999", false),
+            Ok(vec![None])
+        );
+    }
+
+    #[test]
+    fn a_question_mark_outside_quotes_is_found() {
+        for mysql in [false, true] {
+            let found = scan_placeholders("select ?, '?', $1", mysql);
+            assert!(matches!(&found, Ok(found) if found.question), "{mysql}");
+            let found = scan_placeholders("select '?', $1", mysql);
+            assert!(matches!(&found, Ok(found) if !found.question), "{mysql}");
+        }
+    }
+
+    #[test]
+    fn the_checks_give_their_messages_in_order() {
+        let mixed = "use `$1`, `$2`, … or `?`, not both";
+        let zero = "`$0` is not a placeholder; they start at `$1`";
+        let large = "`$` followed by a number too large to be a placeholder";
+        for (text, values, message) in [
+            ("select ?, $1", 1, Some(mixed)),
+            ("select ?, $0", 1, Some(mixed)),
+            ("select ?, $99999999999999999999", 1, Some(mixed)),
+            ("select $0", 0, Some(zero)),
+            ("select $99999999999999999999, $0", 1, Some(zero)),
+            ("select $99999999999999999999", 1, Some(large)),
+            (
+                "select $1, $3",
+                2,
+                Some("the query uses `$1` to `$3` but was given 2 values"),
+            ),
+            (
+                "select $2",
+                1,
+                Some("the query uses `$1` to `$2` but was given 1 value"),
+            ),
+            (
+                "select $1",
+                2,
+                Some("the query uses `$1` but was given 2 values"),
+            ),
+            (
+                "select $1",
+                0,
+                Some("the query uses `$1` but was given 0 values"),
+            ),
+            ("select $1, $3", 3, Some("the query skips `$2`")),
+            ("select $3, $3, $2", 3, Some("the query skips `$1`")),
+            ("select $1, $4, $2", 4, Some("the query skips `$3`")),
+            ("select $1", 1, None),
+            ("select $2, $1, $2", 2, None),
+            ("select '?', $1", 1, None),
+            ("select 1", 0, None),
+            ("select ?", 5, None),
+            ("select '$1'", 0, None),
+        ] {
+            assert_eq!(checked(text, values).as_deref(), message, "{text}");
+        }
     }
 }
