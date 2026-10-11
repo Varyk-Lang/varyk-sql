@@ -5,9 +5,9 @@ for backend services that compiles to Rust: SQLite, Postgres, and MySQL
 through sqlx.
 
 varyk-sql is on [crates.io](https://crates.io/crates/varyk-sql): 0.4
-and 0.3 work with varyk 0.8, 0.2 with varyk 0.7, and 0.1 with varyk 0.6
-(see [Versions](#versions)). Varyk is experimental and pre-1.0: anything
-here may change.
+and 0.3 work with varyk 0.8 or later, 0.2 with varyk 0.7, and 0.1 with
+varyk 0.6 (see [Versions](#versions)). Varyk is experimental and
+pre-1.0: anything here may change.
 
 The package covers what an ordinary service does with a database and
 nothing more: connect, over TLS when the URL asks for it, run
@@ -17,7 +17,7 @@ in-memory SQLite database.
 ## Install
 
 ```sh
-cargo install varyk --version '^0.8' --locked
+cargo install varyk --locked
 varyk init users
 cd users
 varyk add sql
@@ -182,7 +182,7 @@ stage:
 
 ```dockerfile
 FROM rust:1-bookworm AS build
-RUN cargo install varyk --version '^0.8' --locked
+RUN cargo install varyk --locked
 WORKDIR /src
 COPY . .
 RUN varyk build --release
@@ -477,14 +477,18 @@ Run `varyk test` from the package root: `migrate("migrations")` and
 
 ## Versions
 
-A program and varyk-sql must resolve to one `varyk-std`, or the
-generated Rust has two `Error` types, so each minor varyk release is
-followed by a varyk-sql release.
+Since varyk 0.9.0, a package's `varyk-std` line is the oldest varyk
+it builds with: a program that uses varyk-sql 0.3 or 0.4 builds under
+varyk 0.8 or any later one, so a minor varyk release no longer needs a
+varyk-sql release at once. A release that moves the line still follows,
+when convenient, since `varyk publish` of a library that uses
+varyk-sql needs a varyk on the same minor as that line. Releases
+before 0.3 were each written for the one varyk the table names.
 
 | varyk-sql | varyk |
 |---|---|
-| 0.4 | 0.8 |
-| 0.3 | 0.8 |
+| 0.4 | 0.8 or later |
+| 0.3 | 0.8 or later |
 | 0.2 | 0.7 |
 | 0.1 | 0.6 |
 

@@ -1,9 +1,9 @@
 name: Latest varyk
 
 # An early warning, not a required check: does varyk-sql still build and
-# pass its tests with the newest varyk on crates.io? A new minor version
-# of varyk needs a varyk-sql release that moves `varyk-std` to it; this
-# job tries that move for one run, so a red run says the release is due.
+# pass its tests with the newest varyk on crates.io? The job moves
+# `varyk-std` to that varyk's minor for one run, so a red run says a fix
+# is due.
 
 on:
   schedule:
