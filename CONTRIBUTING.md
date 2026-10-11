@@ -43,7 +43,9 @@ let-chains or other later features.
 Every Monday, and on demand from the Actions tab, the "Latest varyk"
 workflow builds and tests varyk-sql with the newest varyk on crates.io,
 moving `varyk-std` to its version for that run. It is not a required
-check; a red run means a new varyk needs a varyk-sql release.
+check; a red run is an early warning that a newer varyk changed
+something varyk-sql's Rust calls. A release that moves `varyk-std`
+follows each minor varyk when convenient, not at once.
 
 ## Where things are
 

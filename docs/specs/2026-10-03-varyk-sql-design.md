@@ -364,8 +364,10 @@ down in the README:
 - **Versions.** The package depends on `varyk-std` with a minor-version
   requirement; a program and the package must resolve to one `varyk-std`
   or the generated Rust has two `Error` types. Each breaking Varyk release
-  is followed by a `varyk-sql` release, and the README keeps a table of
-  which `varyk-sql` works with which `varyk`.
+  is followed by a `varyk-sql` release (since varyk 0.9.0, when
+  convenient: the `varyk-std` line is the oldest varyk the package
+  builds with), and the README keeps a table of which `varyk-sql` works
+  with which `varyk`.
 
 ## 5. Package layout
 
