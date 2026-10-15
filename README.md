@@ -481,9 +481,9 @@ Since varyk 0.9.0, a package's `varyk-std` line is the oldest varyk
 it builds with: a program that uses varyk-sql 0.3 or 0.4 builds under
 varyk 0.8 or any later one, so a minor varyk release no longer needs a
 varyk-sql release at once. A release that moves the line still follows,
-when convenient, since `varyk publish` of a library that uses
-varyk-sql needs a varyk on the same minor as that line. Releases
-before 0.3 were each written for the one varyk the table names.
+when convenient, since `varyk publish` of a library or a program
+that uses varyk-sql needs a varyk on the same minor as that line.
+Releases before 0.3 were each written for the one varyk the table names.
 
 | varyk-sql | varyk |
 |---|---|
